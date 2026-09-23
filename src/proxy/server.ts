@@ -2555,8 +2555,12 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         const durableCheckpointIds = durableMappingAtTurn.status === "found"
           ? durableMappingAtTurn.session.passthroughToolCallIds
           : undefined
-        // NOTE: agent-specific (claude-code) — trailing system reminder of its mid-conversation-system feature; see allowTrailingSystemReminder.
-        const trailingSystemReminderOptions = adapterBase === "claude-code"
+        // NOTE: agent-specific (claude-code, pi) — trailing system reminder: claude-cli's
+        // mid-conversation-system feature, and Oh My Pi upgrading developer-origin notes to a
+        // mid-conversation `system` turn after tool results. Fresh replay already delivers the
+        // reminder as user text, so resuming only avoids rewriting the whole history cache.
+        // See allowTrailingSystemReminder.
+        const trailingSystemReminderOptions = adapterBase === "claude-code" || adapterBase === "pi"
           ? { allowTrailingSystemReminder: true }
           : undefined
         const durableCheckpointContinuation = durableCheckpointIds?.length
