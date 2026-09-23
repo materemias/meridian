@@ -53,6 +53,10 @@ const upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request
     if (apiPhase === "followup") {
       const history = JSON.stringify(body.messages)
       assert(history.includes(receipt), "The fresh CLI must receive the client's real result")
+      if (mode === "client-refusal") {
+        const registeredName = body.tools.find(candidate => candidate.name.endsWith(tool.name))?.name
+        assert(history.includes(registeredName), "Fresh replay did not use the registered MCP tool name")
+      }
       if (mode !== "client-refusal") assert(body.messages.some(message => Array.isArray(message.content) && message.content.some(block =>
         block.type === "tool_result" && block.tool_use_id === toolId)), "Resumed CLI lost structured tool result")
     }
