@@ -11,6 +11,8 @@ import * as sdk from "@anthropic-ai/claude-agent-sdk"
 const root = realpathSync(mkdtempSync(join(tmpdir(), "meridian-cap-")))
 const stream = process.argv.includes("--stream")
 const mode = process.argv.find(arg => arg.startsWith("--case="))?.slice(7) ?? "partial"
+const headerless = process.argv.includes("--headerless")
+if (headerless) assert(mode === "client-refusal", "Headerless Pi is only tested with CLI refusal recovery")
 assert(["partial", "empty", "thinking", "unhandled", "retry", "retry-resume", "pinned", "client-refusal"].includes(mode))
 if (mode === "client-refusal") assert(stream, "CLI refusal recovery is streaming-only")
 const retry = mode.startsWith("retry")
@@ -144,7 +146,7 @@ async function request(messages, includeTools = true) {
   if (mode === "client-refusal") {
     headers["x-meridian-agent"] = "pi"
     headers["user-agent"] = "pi/0.85.0"
-    headers["x-session-affinity"] = "cap-cli-refusal"
+    if (!headerless) headers["x-session-affinity"] = "cap-cli-refusal"
   } else headers["x-opencode-session"] = "cap-fixture"
   const response = await fetch(`http://127.0.0.1:${address.port}/v1/messages`, {
     method: "POST", headers,
@@ -226,7 +228,7 @@ try {
     assert.equal(response.content.length, 1)
     assert.equal(response.content[0].id, toolId)
     assert.equal(response.content[0].name, tool.name)
-    assert.equal(capQueries[0].resume, source)
+    if (!headerless) assert.equal(capQueries[0].resume, source)
     assert(!hooks.some(hook => hook.phase === "cap"), "CLI executed a client tool instead of rejecting the bare name")
     assert(rejections.some(result => result.phase === "cap" && result.attempt === 1 && result.id === toolId &&
       JSON.stringify(result.content).includes("No such tool available: " + tool.name)),

@@ -2442,6 +2442,15 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         const isClientDrivenLoop = !ownsToolLoopWithResume && !agentSessionId && lastIsToolResult
         const durableMappingKey = profileSessionId
           || getConversationFingerprint(lineageMessages, profileScopedCwd)
+        // A headerless Pi tool round must stay independent of the fingerprint's
+        // SDK checkpoint: concurrent loops can share its first user message.
+        // The refused tool-use ID keys only a one-shot tool-schema grant, so
+        // sibling loops with distinct tool-use IDs cannot overwrite one another.
+        const anonymousRecoveryKey = (toolId: string): string | undefined =>
+          adapterBase === "pi" && !agentSessionId && durableMappingKey && toolId &&
+          !isSubagentRequest && !requestSource?.startsWith("fork-")
+            ? `pi-recovery:${durableMappingKey}:${toolId}`
+            : undefined
         // The fork/subagent independence guard protects HEADERLESS flows from
         // colliding on the shared (firstUserMessage, cwd) fingerprint. Adapter
         // mode and generic source declarations share the subagent behavior. An
@@ -3083,11 +3092,20 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       const clientOmittedTools = !Object.hasOwn(body, "tools")
       const advisorModel = extractAdvisorModel(requestTools)
       if (advisorModel) requestTools = stripAdvisorTools(requestTools)
-      if (passthrough && profileSessionId) {
-        const cached = sessionToolCache.get(profileSessionId)
+      let firstResultId: string | undefined
+      if (!profileSessionId && adapterBase === "pi" && Array.isArray(lastMessage?.content)) {
+        for (const block of lastMessage.content) {
+          if (block?.type === "tool_result" && typeof block.tool_use_id === "string" &&
+            (!firstResultId || block.tool_use_id < firstResultId)) firstResultId = block.tool_use_id
+        }
+      }
+      const recoveryToolKey = profileSessionId ?? (firstResultId ? anonymousRecoveryKey(firstResultId) : undefined)
+      if (passthrough && recoveryToolKey) {
+        const cached = sessionToolCache.get(recoveryToolKey)
         const recovered = cached?.recovery
         if (cached && recovered) {
-          delete cached.recovery
+          if (profileSessionId) delete cached.recovery
+          else sessionToolCache.delete(recoveryToolKey)
           const delta = lineageMessages.slice(recovered.prefixHashes.length)
           const echo = delta[0]
           const matchesPrefix = recovered.prefixHashes.every((hash, index) =>
@@ -3098,7 +3116,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             : []
           if (
             clientOmittedTools && requestTools.length === 0 && !isResume && !isUndo && !resumeSessionId &&
-            !isIndependentSession && matchesPrefix &&
+            (!isIndependentSession || (!profileSessionId && independentCause === "headerless-tool-result")) && matchesPrefix &&
             echo?.role === "assistant" &&
             echoedIds.length === recovered.toolIds.length &&
             recovered.toolIds.every((id) => echoedIds.includes(id)) &&
@@ -3108,7 +3126,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             plog(`[PROXY] ${requestMeta.requestId} tools_restored: recovered tool-result continuation reused ${requestTools.length} declared tools`)
           }
         }
-        if (isResume && requestTools.length === 0 && cached && cached.sdkSessionId === resumeSessionId && cached.tools.length > 0) {
+        if (profileSessionId && isResume && requestTools.length === 0 && cached && cached.sdkSessionId === resumeSessionId && cached.tools.length > 0) {
           requestTools = cached.tools
           plog(`[PROXY] ${requestMeta.requestId} tools_restored: client sent 0 tools but continued branch had ${cached.tools.length} — reusing cached tools to preserve prompt cache`)
         }
@@ -6920,13 +6938,23 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 const terminalStopEnqueued = safeEnqueue(encoder.encode(
                   `event: message_stop\ndata: {"type":"message_stop"}\n\n`
                 ), "recover_message_stop")
+                let firstStreamedId: string | undefined
+                if (!profileSessionId && adapterBase === "pi") {
+                  for (const id of streamedToolUseIds) {
+                    if (!firstStreamedId || id < firstStreamedId) firstStreamedId = id
+                  }
+                }
+                const recoveryToolKey = profileSessionId ??
+                  (firstStreamedId ? anonymousRecoveryKey(firstStreamedId) : undefined)
                 if (
                   terminalDeltaEnqueued && terminalStopEnqueued &&
-                  recoveredMappingEvicted && mustEvictBeforeRecoveredTerminal &&
+                  // An independent Pi turn has no durable SDK mapping to evict.
+                  ((recoveredMappingEvicted && mustEvictBeforeRecoveredTerminal) ||
+                    (isIndependentSession && !profileSessionId)) &&
                   !requestAbort.controller.signal.aborted &&
-                  profileSessionId && requestTools.length > 0
+                  recoveryToolKey && requestTools.length > 0
                 ) {
-                  sessionToolCache.set(profileSessionId, {
+                  sessionToolCache.set(recoveryToolKey, {
                     sdkSessionId: currentSessionId ?? "",
                     tools: requestTools,
                     recovery: {

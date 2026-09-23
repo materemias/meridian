@@ -617,11 +617,15 @@ SDK session and only the tool set from that recovered turn:
 
 ```bash
 bun scripts/e2e-capped-turns.mjs --case=client-refusal --stream
+bun scripts/e2e-capped-turns.mjs --case=client-refusal --stream --headerless
 ```
 
-This is deterministic real CLI/SDK dispatch with a fixture upstream, not a
-claim that the real Claude model chose a bare name. Keep the affected-model
-Pi live gate alongside it when accepting passthrough changes.
+The second command omits Pi's optional session-affinity header and metadata
+identity, exercising the default fingerprint-scoped, one-shot result handoff
+without resuming another anonymous SDK session. Both commands use real CLI/SDK
+dispatch with a fixture upstream, not a claim that the real Claude model chose
+a bare name. Keep the affected-model Pi live gate alongside them when accepting
+passthrough changes.
 
 For the affected model and Pi adapter on Linux, also run the live
 multi-turn control (real Claude Team account, not the fixture upstream):
