@@ -61,7 +61,7 @@ import { LRUMap } from "../utils/lruMap"
 import { telemetryStore, diagnosticLog, createTelemetryRoutes, landingHtml, renderPrometheusMetrics, resolveTelemetryConfig, diagnosticLogCapacity } from "../telemetry"
 import { detectSupervision } from "./supervision"
 import type { RequestMetric } from "../telemetry"
-import { canRecoverCapturedToolUses, canRecoverUncapturedToolUses, isStreamedToolBlockComplete, type StreamedToolBlockRecord, classifyError, extractSdkTermination, formatSdkTermination, classifyResumeRefusal, isRateLimitError, isExtraUsageRequiredError, isExpiredTokenError, isAccountFailoverError, isQuotaRefusal, isOutputTokenCapExceeded } from "./errors"
+import { canRecoverCapturedToolUses, canRecoverUncapturedToolUses, isStreamedToolBlockComplete, unavailableToolResults, type StreamedToolBlockRecord, classifyError, extractSdkTermination, formatSdkTermination, classifyResumeRefusal, isRateLimitError, isExtraUsageRequiredError, isExpiredTokenError, isAccountFailoverError, isQuotaRefusal, isOutputTokenCapExceeded } from "./errors"
 import { refreshOAuthToken, ensureFreshToken, startBackgroundRefresh, stopBackgroundRefresh, createPlatformCredentialStore, readStoredCredentialPresence, getAuthRenewalStatus, getStoredPlanFields, resolveRenewalWarnDays, type CredentialStore, type StoredPlanFields } from "./tokenRefresh"
 import { planAllowance } from "./planAllowance"
 import { isCredentialsReadOnly, logCredentialsModeBanner } from "./credentialsMode"
@@ -4629,20 +4629,17 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             let nextPassthroughToolCallAssistantUuid: string | undefined
             let nextPassthroughToolCallIds: string[] | undefined
             let sawCanonicalResult = false
-            // Uncaptured-tool recovery (the 0a95wd-tusk incident shape): a
-            // capped turn whose tool_use blocks fully streamed but were never
-            // captured or dispatched because an abort landed between stream
-            // completion and hook dispatch. Opt-IN while the authorization
-            // boundary is validated (MERIDIAN_PASSTHROUGH_UNCAPTURED_TOOL_RECOVERY=1).
-            // The tracker below is likewise flag-gated: with the recovery off,
-            // no per-block records are kept and diagnostics continue to show
-            // tools=0/N on the error path as before.
-            const uncapturedToolRecoveryEnabled =
-              env("PASSTHROUGH_UNCAPTURED_TOOL_RECOVERY") === "1"
-            // Per-client-index completeness record for every forwarded tool_use
-            // block. Populated only on real wire forwarding — synthetic
-            // flushOpenClientBlocks closures never mark naturalStop.
+            // The CLI sometimes refuses a bare client tool name before the
+            // PreToolUse hook runs. A complete streamed call with an explicit,
+            // id-matched "No such tool available" result can still be handed to
+            // the client, but the rejected SDK session must be evicted first.
+            // The opt-in flag also covers uncaptured calls without that proof;
+            // =0 disables both paths.
+            const uncapturedRecoverySetting = env("PASSTHROUGH_UNCAPTURED_TOOL_RECOVERY")
+            const uncapturedToolRecoveryEnabled = uncapturedRecoverySetting === "1"
+            const trackUncapturedTools = uncapturedRecoverySetting !== "0"
             const streamedToolBlockRecords = new Map<number, StreamedToolBlockRecord>()
+            const unavailableToolNames = new Map<string, string>()
             // Silent-turn recovery state (see turnOutcome.ts). Kill switch:
             // MERIDIAN_SILENT_TURN_RECOVERY=0 leaves the detection and the
             // telemetry in place and skips only the extra model turn — so an
@@ -4719,12 +4716,15 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
               } catch {
                 // Malformed JSON retains the original wire payload.
               }
-              safeEnqueue(encoder.encode(
+              if (safeEnqueue(encoder.encode(
                 `event: content_block_delta\ndata: ${JSON.stringify({
                   type: "content_block_delta", index: clientIdx,
                   delta: { type: "input_json_delta", partial_json: fixed },
                 })}\n\n`
-              ), "passthrough_tool_fixed_delta")
+              ), "passthrough_tool_fixed_delta")) {
+                const record = streamedToolBlockRecords.get(clientIdx)
+                if (record) record.json += fixed
+              }
             }
 
             // Envelope integrity: every path that ends the client stream must
@@ -5134,6 +5134,11 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   } else if (earlyStopEnabled && message.type === "user" && !earlyStopFired) {
                     noteUserContent(earlyStop, (message as any).message?.content)
                   }
+                  if (trackUncapturedTools && message.type === "user") {
+                    for (const { id, name } of unavailableToolResults(message.message.content)) {
+                      unavailableToolNames.set(id, resolveClientToolName(name, passthroughMcp?.clientNameByAlias, passthroughMcpName))
+                    }
+                  }
                   if (earlyStopEnabled && !earlyStopFired) {
                     // A deny may precede the last per-block assistant metadata.
                     // The client-visible stream is the completeness oracle: wait
@@ -5454,7 +5459,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                     // complete only when its content_block_stop was really
                     // enqueued (synthetic flushOpenClientBlocks closures never
                     // count) and its accumulated JSON parses as an object.
-                    if (passthrough && uncapturedToolRecoveryEnabled) {
+                    if (passthrough && trackUncapturedTools) {
                       const clientIdx = eventIndex !== undefined ? sdkToClientIndex.get(eventIndex) ?? eventIndex : undefined
                       if (clientIdx !== undefined) {
                         if (eventType === "content_block_start") {
@@ -6473,13 +6478,19 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 abortIsOurs: sawDuplicateToolUse,
               }) && messageStartEmitted
 
-              // Uncaptured-streamed recovery (opt-in): the abort-window shape
-              // where every tool_use block fully streamed but the hook never
-              // ran. All the caller-side gates live here: attempted cap, no
-              // drop/duplicate/forced-single/early-stop state, no cancellation
-              // of any kind, open envelope, and every streamed block complete
-              // with a declared client tool name. An aborted request must
-              // never be salvaged into a success — `abort=none` is required.
+              // Uncaptured streamed calls can recover only at this proxy's
+              // one-turn cap, with a complete client-visible envelope and no
+              // cancellation. The opt-in covers the abort-window shape; an
+              // explicit CLI dispatch rejection also qualifies by default,
+              // even if that rejection settled the early-stop tracker.
+              // A generic failed result may follow an executed tool. Only the
+              // CLI's explicit dispatch rejection for EVERY streamed id proves
+              // these calls were never run. The existing opt-in abort-window
+              // recovery remains separately gated.
+              const confirmedToolUnavailable = trackUncapturedTools &&
+                streamedToolBlockRecords.size > 0 &&
+                [...streamedToolBlockRecords.values()].every(record =>
+                  unavailableToolNames.get(record.id) === record.name)
               const uncapturedEligible = (() => {
                 if (!canRecoverUncapturedToolUses({
                   reason: sdkTerm.reason,
@@ -6491,9 +6502,10 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                   forceSingleToolUse,
                   earlyStopFired,
                   uncapturedRecoveryEnabled: uncapturedToolRecoveryEnabled,
+                  confirmedToolUnavailable,
                   attemptedMaxTurns: lastAttemptMaxTurns,
                 })) return false
-                if (!messageStartEmitted || streamClosed || pendingTerminalDelta) return false
+                if (!messageStartEmitted || streamClosed || (pendingTerminalDelta && !confirmedToolUnavailable)) return false
                 if (durableWritesRevoked) return false
                 if (requestAbort.abortSnapshot().aborted) return false
                 // Every streamed block must be complete AND name a declared
