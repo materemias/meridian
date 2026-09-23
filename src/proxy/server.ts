@@ -641,7 +641,13 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
 
   // Cache last-seen tool definitions per agent session to prevent prompt cache
   // invalidation when clients intermittently omit tools on continuation requests.
-  const sessionToolCache = new LRUMap<string, { sdkSessionId: string; tools: any[] }>(getMaxSessionsLimit())
+  // SDK checkpoint eviction after a recovered tool-use refusal permits one
+  // matching tool-result continuation to reuse the declared tool definitions.
+  const sessionToolCache = new LRUMap<string, {
+    sdkSessionId: string
+    tools: Parameters<typeof createPassthroughMcpServer>[0]
+    recovery?: { prefixHashes: string[]; toolIds: string[] }
+  }>(getMaxSessionsLimit())
   // Cache the passthrough MCP server per session. Reusing the same server
   // across turns (when the tool set is unchanged) avoids subtle prompt-cache
   // invalidation from MCP server re-creation. Key hashes tool name + schema
@@ -3076,11 +3082,37 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       let requestTools = Array.isArray(body.tools) ? body.tools : []
       const advisorModel = extractAdvisorModel(requestTools)
       if (advisorModel) requestTools = stripAdvisorTools(requestTools)
-      if (passthrough && isResume && requestTools.length === 0 && profileSessionId) {
+      const clientOmittedTools = !Object.hasOwn(body, "tools")
+      if (passthrough && profileSessionId) {
         const cached = sessionToolCache.get(profileSessionId)
-        if (cached && cached.sdkSessionId === resumeSessionId && cached.tools.length > 0) {
-          requestTools = cached.tools
-          plog(`[PROXY] ${requestMeta.requestId} tools_restored: client sent 0 tools but continued branch had ${cached.tools.length} — reusing cached tools to preserve prompt cache`)
+        const recovered = cached?.recovery
+        if (cached && recovered) {
+          delete cached.recovery
+          const delta = lineageMessages.slice(recovered.prefixHashes.length)
+          const echo = delta[0]
+          const matchesPrefix = recovered.prefixHashes.every((hash, index) =>
+            index < lineageMessages.length && hashMessage(lineageMessages[index]) === hash)
+          const echoedIds = Array.isArray(echo?.content)
+            ? echo.content.filter((block: { type?: unknown; id?: unknown } | null) => block?.type === "tool_use")
+                .map((block: { id?: unknown }) => block.id)
+            : []
+          if (
+            clientOmittedTools && requestTools.length === 0 && !isResume && !isUndo && !resumeSessionId &&
+            !isIndependentSession && matchesPrefix &&
+            echo?.role === "assistant" &&
+            echoedIds.length === recovered.toolIds.length &&
+            recovered.toolIds.every((id) => echoedIds.includes(id)) &&
+            coalesceCompleteToolResultContinuation(delta, recovered.toolIds, trailingSystemReminderOptions)
+          ) {
+            requestTools = cached.tools
+            plog(`[PROXY] ${requestMeta.requestId} tools_restored: recovered tool-result continuation reused ${requestTools.length} declared tools`)
+          }
+        }
+        if (isResume && requestTools.length === 0) {
+          if (cached && cached.sdkSessionId === resumeSessionId && cached.tools.length > 0) {
+            requestTools = cached.tools
+            plog(`[PROXY] ${requestMeta.requestId} tools_restored: client sent 0 tools but continued branch had ${cached.tools.length} — reusing cached tools to preserve prompt cache`)
+          }
         }
       }
       // NOTE: agent-specific MCP namespace comes from the selected adapter.
@@ -3311,6 +3343,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       // Tool cache: if the client omits tools on a continuation request but
       // previously sent them, reuse the cached set to preserve prompt cache.
       let passthroughMcp: ReturnType<typeof createPassthroughMcpServer> | undefined
+
       if (passthrough && requestTools.length > 0) {
         const toolSetKey = computeToolSetKey(requestTools)
         const cachedMcp = profileSessionId ? sessionMcpCache.get(profileSessionId) : undefined
@@ -6723,6 +6756,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 // the durable mapping must be invalidated before the terminal
                 // authorizes tool execution.
                 (!isIndependentSession && uncapturedRecoveryActive && !recoverableCheckpoint)
+              let recoveredMappingEvicted = false
               if (
                 mustEvictBeforeRecoveredTerminal ||
                 (
@@ -6744,6 +6778,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 if (mustEvictBeforeRecoveredTerminal && !evicted) {
                   throw new Error("Shared session mapping changed before recovery invalidation")
                 }
+                recoveredMappingEvicted = evicted
                 claudeLog("passthrough.noncanonical_session_evicted", { mode: "stream", reason: "drain_error" })
               }
 
@@ -6878,16 +6913,31 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                 // recovered tool results.
                 assertPriorityPublicationReady()
                 finalizePriorityPublication()
-                safeEnqueue(encoder.encode(
+                const terminalDeltaEnqueued = safeEnqueue(encoder.encode(
                   `event: message_delta\ndata: ${JSON.stringify({
                     type: "message_delta",
                     delta: { stop_reason: "tool_use", stop_sequence: null },
                     usage: { output_tokens: lastUsage?.output_tokens ?? 0 }
                   })}\n\n`
                 ), "recover_message_delta")
-                safeEnqueue(encoder.encode(
+                const terminalStopEnqueued = safeEnqueue(encoder.encode(
                   `event: message_stop\ndata: {"type":"message_stop"}\n\n`
                 ), "recover_message_stop")
+                if (
+                  terminalDeltaEnqueued && terminalStopEnqueued &&
+                  recoveredMappingEvicted && mustEvictBeforeRecoveredTerminal &&
+                  !requestAbort.controller.signal.aborted &&
+                  profileSessionId && requestTools.length > 0
+                ) {
+                  sessionToolCache.set(profileSessionId, {
+                    sdkSessionId: currentSessionId ?? "",
+                    tools: requestTools,
+                    recovery: {
+                      prefixHashes: computeMessageHashes(lineageMessages),
+                      toolIds: [...streamedToolUseIds],
+                    },
+                  })
+                }
                 recordEnvelopeViolations(checkUndeliveredToolUses(capturedToolUses, streamedToolUseIds))
 
                 // Record as success — the client got a usable response.
