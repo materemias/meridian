@@ -2421,8 +2421,25 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         // x-opencode-session, LiteLLM's x-litellm-session-id) never reach the
         // fingerprint path, so they are unaffected.
         const lastMessage = Array.isArray(body.messages) ? body.messages[body.messages.length - 1] : undefined
-        const lastIsToolResult = Array.isArray(lastMessage?.content)
-          && lastMessage.content.some((b: any) => b?.type === "tool_result")
+        let toolResultContent = Array.isArray(lastMessage?.content) &&
+          lastMessage.content.some((block: { type?: unknown } | null) => block?.type === "tool_result")
+          ? lastMessage.content
+          : undefined
+        if (!toolResultContent && adapterBase === "pi" && !agentSessionId && Array.isArray(body.messages)) {
+          // A Pi result turn may queue user text or append a system reminder.
+          // Stop at the newest assistant turn so an older result cannot make
+          // an unrelated fresh request inherit this turn's recovery grant.
+          for (let index = body.messages.length - 1; index >= 0; index--) {
+            const message = body.messages[index]
+            if (message?.role === "assistant") break
+            if (message?.role === "user" && Array.isArray(message.content) &&
+              message.content.some((block: { type?: unknown } | null) => block?.type === "tool_result")) {
+              toolResultContent = message.content
+              break
+            }
+          }
+        }
+        const lastIsToolResult = Boolean(toolResultContent)
         // NOTE: Claude Code owns its tool loop but also expects Meridian to
         // resume the backing SDK session. Older clients may omit metadata, so
         // preserve fingerprint resume instead of treating their tool results
@@ -3093,8 +3110,8 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
       const advisorModel = extractAdvisorModel(requestTools)
       if (advisorModel) requestTools = stripAdvisorTools(requestTools)
       let firstResultId: string | undefined
-      if (!profileSessionId && adapterBase === "pi" && Array.isArray(lastMessage?.content)) {
-        for (const block of lastMessage.content) {
+      if (!profileSessionId && adapterBase === "pi" && Array.isArray(toolResultContent)) {
+        for (const block of toolResultContent) {
           if (block?.type === "tool_result" && typeof block.tool_use_id === "string" &&
             (!firstResultId || block.tool_use_id < firstResultId)) firstResultId = block.tool_use_id
         }
