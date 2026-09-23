@@ -609,6 +609,31 @@ hidden drain can overlap a follow-up; auxiliary CLI requests are excluded.
 Run all four live Claude Max E41 modes alongside these controls, plus the #925
 `--fixture --stream --drop-stop` control when changing stream recovery.
 
+The explicit CLI-refusal control uses a declared client tool whose **bare**
+name is emitted by a local Anthropic response fixture. The real CLI rejects
+that name before PreToolUse; Meridian must complete the Pi streaming handoff
+and accept a subsequent tool-result request with `tools` omitted, using a fresh
+SDK session and only the tool set from that recovered turn:
+
+```bash
+bun scripts/e2e-capped-turns.mjs --case=client-refusal --stream
+```
+
+This is deterministic real CLI/SDK dispatch with a fixture upstream, not a
+claim that the real Claude model chose a bare name. Keep the affected-model
+Pi live gate alongside it when accepting passthrough changes.
+
+For the affected model and Pi adapter on Linux, also run the live
+multi-turn control (real Claude Team account, not the fixture upstream):
+
+```bash
+PROBE_ADAPTER=pi PROBE_MODEL=claude-opus-5-5 PROBE_PARALLEL=1 bun scripts/e2e-passthrough-turns.mjs --stream
+```
+
+This verifies Pi tool execution and continuation on the real model; the
+CLI-refusal fixture above separately forces the otherwise nondeterministic
+bare-name dispatch error.
+
 ### Passthrough argument repair (#925)
 
 ```bash
