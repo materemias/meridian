@@ -23,6 +23,7 @@
  */
 
 import { createHash } from "node:crypto"
+import { z } from "zod"
 import { claudeLog } from "../logger"
 import { isCredentialsReadOnly } from "./credentialsMode"
 import { parseRetryAfterMs } from "./retryAfter"
@@ -444,14 +445,15 @@ type UsageCallResult = Awaited<ReturnType<typeof callAnthropic>>
  */
 async function retryAfterRateLimitRun(
   limited: UsageCallResult,
-  ctx: { store: CredentialStore; refresh: RefreshFn; cacheKey: string; token: string; fetchImpl: FetchLike },
+  ctx: { store: CredentialStore; refresh: RefreshFn; cacheKey: string; token: string; fetchImpl: FetchLike; owner: Promise<RawUsageResult> },
 ): Promise<UsageCallResult> {
   const runLength = countRateLimited(ctx.cacheKey, ctx.token)
   if (!claimRateLimitRefresh(ctx.cacheKey, runLength)) return limited
   claudeLog("oauth_usage.refresh_on_429", { profile: ctx.cacheKey, runLength })
   const newToken = await refreshAndRead(ctx.store, ctx.refresh, ctx.cacheKey, "rate_limited")
-  if (!newToken) return limited
+  if (!newToken || inflightByProfile.get(ctx.cacheKey) !== ctx.owner) return limited
   const retried = await callAnthropic(newToken, ctx.fetchImpl)
+  if (inflightByProfile.get(ctx.cacheKey) !== ctx.owner) return retried
   if ("__status" in retried && retried.__status === 429) countRateLimited(ctx.cacheKey, newToken)
   else rateLimitRunByProfile.delete(ctx.cacheKey)
   return retried
@@ -470,6 +472,131 @@ export interface FetchOAuthUsageOpts {
   fetchImpl?: FetchLike
   /** Override the token refresh (for testing). Defaults to refreshOAuthToken. */
   refreshImpl?: RefreshFn
+}
+
+export const quotaResetBody = z.object({
+  profile: z.string().min(1),
+  grantId: z.string().regex(/^[a-z0-9_-]{1,40}$/),
+  requestId: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+}).strict()
+
+export type OAuthQuotaResetRequest = z.infer<typeof quotaResetBody>
+const quotaResetIdentity = z.object({ organization: z.object({ uuid: z.string().uuid() }) })
+
+const quotaResetOutcome = z.object({
+  result: z.enum(["reset", "already_used", "not_limited", "cooldown", "ineligible", "unavailable"]),
+  reason: z.string().nullable().optional(),
+  resets_left: z.number().int().nonnegative().nullable().optional(),
+  cleared: z.array(z.string()).optional(),
+  weekly_resets_at: z.string().datetime({ offset: true }).nullable().optional(),
+  cooldown_until: z.string().datetime({ offset: true }).nullable().optional(),
+})
+
+export type OAuthResetFailureCode = "no_token" | "no_organization"
+  | "upstream_auth" | "rate_limited" | "upstream_error" | "invalid_response" | "reset_indeterminate"
+
+type OAuthResetFailure = {
+  ok: false
+  status: 401 | 429 | 502 | 503
+  code: OAuthResetFailureCode
+  message: string
+  indeterminate: boolean
+}
+
+export type OAuthResetResult = OAuthResetFailure | {
+  ok: true
+  outcome: {
+    result: z.infer<typeof quotaResetOutcome>["result"]
+    reason: string | null
+    resetsLeft: number | null
+    cleared: string[]
+    weeklyResetsAt: number | null
+    cooldownUntil: number | null
+  }
+}
+
+function invalidateResetUsage(profileId?: string | null): void {
+  clearOAuthUsageForProfile(profileId)
+  if (profileId == null) clearOAuthUsageForProfile("default")
+}
+
+function fail(status: OAuthResetFailure["status"], code: OAuthResetFailureCode, message: string, indeterminate = false): OAuthResetFailure {
+  return { ok: false, status, code, message, indeterminate }
+}
+
+function httpFailure(status: number): OAuthResetFailure {
+  if (status === 401 || status === 403) return fail(502, "upstream_auth", "Upstream rejected OAuth credentials")
+  if (status === 429) return fail(429, "rate_limited", "Upstream rate limited the request")
+  return fail(502, "upstream_error", "Upstream request failed")
+}
+
+/** One explicit mutation; request IDs are caller-owned, not a promise of provider deduplication. */
+export async function redeemOAuthQuotaReset(
+  input: OAuthQuotaResetRequest,
+  opts?: Pick<FetchOAuthUsageOpts, "store" | "profileId" | "claudeConfigDir" | "fetchImpl" | "refreshImpl">,
+): Promise<OAuthResetResult> {
+  const fetchImpl = opts?.fetchImpl ?? globalThis.fetch
+  const store = opts?.store ?? createPlatformCredentialStore({ claudeConfigDir: opts?.claudeConfigDir })
+  let token: string | null
+  try {
+    token = await tokenForCall(store, opts?.refreshImpl ?? refreshOAuthToken, opts?.profileId ?? DEFAULT_KEY)
+  } catch {
+    return fail(503, "no_token", "Could not read OAuth credentials")
+  }
+  if (!token) return fail(401, "no_token", "No OAuth access token available")
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    "anthropic-beta": OAUTH_BETA_HEADER,
+    "User-Agent": "claude-cli/2.1.304 (external, cli)",
+    "Content-Type": "application/json",
+  }
+  let organization: string
+  try {
+    const identity = await fetchImpl("https://api.anthropic.com/api/oauth/profile", {
+      headers, redirect: "error", signal: AbortSignal.timeout(25_000),
+    })
+    if (!identity.ok) return httpFailure(identity.status)
+    const profile = quotaResetIdentity.safeParse(await identity.json())
+    if (!profile.success) return fail(502, "no_organization", "OAuth identity did not include a valid organization")
+    organization = profile.data.organization.uuid
+  } catch {
+    return fail(502, "upstream_error", "Could not read OAuth organization")
+  }
+  try {
+    const response = await fetchImpl(`https://api.anthropic.com/api/organizations/${organization}/reset_rate_limits`, {
+      method: "POST", headers, redirect: "error", signal: AbortSignal.timeout(25_000),
+      body: JSON.stringify({ program: "cedar_ember", grant_id: input.grantId, request_id: input.requestId }),
+    })
+    if (!response.ok) {
+      if (response.status >= 500 || (response.status >= 300 && response.status < 400)) {
+        invalidateResetUsage(opts?.profileId)
+        return fail(502, "reset_indeterminate", "Reset outcome is unknown; do not automatically retry", true)
+      }
+      return httpFailure(response.status)
+    }
+    let body: unknown
+    try {
+      body = await response.json()
+    } catch {
+      invalidateResetUsage(opts?.profileId)
+      return fail(502, "invalid_response", "Reset response was invalid; outcome is unknown", true)
+    }
+    const result = quotaResetOutcome.safeParse(body)
+    if (!result.success) {
+      invalidateResetUsage(opts?.profileId)
+      return fail(502, "invalid_response", "Reset response was invalid; outcome is unknown", true)
+    }
+    const value = result.data
+    if (value.result === "reset") invalidateResetUsage(opts?.profileId)
+    return { ok: true, outcome: {
+      result: value.result, reason: value.reason ?? null, resetsLeft: value.resets_left ?? null,
+      cleared: value.cleared ?? [], weeklyResetsAt: value.weekly_resets_at ? Date.parse(value.weekly_resets_at) : null,
+      cooldownUntil: value.cooldown_until ? Date.parse(value.cooldown_until) : null,
+    } }
+  } catch {
+    invalidateResetUsage(opts?.profileId)
+    return fail(502, "reset_indeterminate", "Reset outcome is unknown; do not automatically retry", true)
+  }
 }
 
 /**
@@ -565,6 +692,7 @@ async function fetchOAuthUsageImpl(opts?: FetchOAuthUsageOpts): Promise<RawUsage
   // upstream. The 429 cooldown turns polls away before either, and those must
   // not advance the failure count — see OAuthUsageFailure.
   const staleOr = (reason: string, error: OAuthUsageError, attempted = true): RawUsageResult => {
+    if (attempted && inflightByProfile.get(cacheKey) !== promise) return { snapshot: null, error }
     if (attempted) recordFailure(cacheKey, error)
     const last = cacheByProfile.get(cacheKey)
     if (last && Date.now() - last.fetchedAt < staleMaxMs) {
@@ -594,9 +722,10 @@ async function fetchOAuthUsageImpl(opts?: FetchOAuthUsageOpts): Promise<RawUsage
   const rateLimitBackoffMs = opts?.rateLimitBackoffMs ?? RATE_LIMIT_BACKOFF_MS_DEFAULT
   const refresh = opts?.refreshImpl ?? refreshOAuthToken
 
-  const promise = (async () => {
+  async function fetchAndCacheUsage(): Promise<RawUsageResult> {
     try {
       let token = await tokenForCall(store, refresh, cacheKey)
+      if (inflightByProfile.get(cacheKey) !== promise) return { snapshot: null, error: "upstream_error" }
       if (!token) {
         // This read failing intermittently (e.g. a Keychain entry racing a
         // token-refresh rewrite) was previously silent — log it so flapping
@@ -606,6 +735,7 @@ async function fetchOAuthUsageImpl(opts?: FetchOAuthUsageOpts): Promise<RawUsage
       }
 
       let result = await callAnthropic(token, fetchImpl)
+      if (inflightByProfile.get(cacheKey) !== promise) return { snapshot: null, error: "upstream_error" }
       if ("__status" in result && result.__status === 401) {
         claudeLog("oauth_usage.token_refresh_attempt", { profile: cacheKey })
         const refreshed = await refresh(store)
@@ -619,15 +749,18 @@ async function fetchOAuthUsageImpl(opts?: FetchOAuthUsageOpts): Promise<RawUsage
           return staleOr("refresh_failed", "upstream_error")
         }
         const newToken = await readAccessToken(store)
+        if (inflightByProfile.get(cacheKey) !== promise) return { snapshot: null, error: "upstream_error" }
         if (!newToken) return staleOr("no_token_after_refresh", "no_token")
         token = newToken
         result = await callAnthropic(newToken, fetchImpl)
       }
+      if (inflightByProfile.get(cacheKey) !== promise) return { snapshot: null, error: "upstream_error" }
       if ("__status" in result && result.__status === 429) {
-        result = await retryAfterRateLimitRun(result, { store, refresh, cacheKey, token, fetchImpl })
+        result = await retryAfterRateLimitRun(result, { store, refresh, cacheKey, token, fetchImpl, owner: promise })
       } else {
         rateLimitRunByProfile.delete(cacheKey)
       }
+      if (inflightByProfile.get(cacheKey) !== promise) return { snapshot: null, error: "upstream_error" }
       if ("__status" in result) {
         if (result.__status === 429) {
           // Floor at the backoff, but cap at staleMaxMs: the cooldown suppresses
@@ -660,10 +793,11 @@ async function fetchOAuthUsageImpl(opts?: FetchOAuthUsageOpts): Promise<RawUsage
       claudeLog("oauth_usage.fetch_failed", { profile: cacheKey, error: err instanceof Error ? err.message : String(err) })
       return staleOr("exception", "upstream_error")
     } finally {
-      inflightByProfile.delete(cacheKey)
+      if (inflightByProfile.get(cacheKey) === promise) inflightByProfile.delete(cacheKey)
     }
-  })()
+  }
 
+  const promise = fetchAndCacheUsage()
   inflightByProfile.set(cacheKey, promise)
   return promise
 }

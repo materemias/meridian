@@ -54,6 +54,49 @@ does not redeem them.
 
 Subscription limits, context occupancy, and API-equivalent cost are different measures. A cache hit does not mean zero subscription usage, and a large context window does not mean that much quota remains.
 
+### Redeeming a banked reset
+
+`POST /v1/usage/quota/reset` consumes a reset if Claude accepts the request.
+It is an explicit action, not a quota poll or health check. Send a JSON object:
+
+```json
+{
+  "profile": "work",
+  "grantId": "chosen-grant-id",
+  "requestId": "client-operation-uuid"
+}
+```
+
+All three fields are required. Use the profile and grant IDs from
+`/v1/usage/quota/all`; there is no active-profile or next-grant fallback.
+Use `profile: "default"` for the single-account entry when no profiles are
+configured. API-key profiles cannot redeem Claude grants.
+`grantId` accepts 1–40 lowercase letters, digits, underscores or hyphens.
+`requestId` accepts 1–64 letters, digits, underscores or hyphens.
+Generate a request ID once per intentional redemption and retain it with
+that operation.
+
+The endpoint uses the selected profile's OAuth token to resolve its organization.
+It inherits API-key authentication and rejects cross-origin browser requests.
+Responses use `Cache-Control: no-store`.
+
+A parsed provider response returns HTTP 200 with the requested IDs and
+`result`, `reason`, `resetsLeft`, `cleared`, `weeklyResetsAt` and `cooldownUntil`.
+Only `result: "reset"` confirms redemption. Other results are `already_used`,
+`not_limited`, `cooldown`, `ineligible` and `unavailable`.
+Times are epoch milliseconds, or `null` when unavailable.
+A confirmed reset invalidates the selected account's cached usage and stale
+routing/SDK health so its next request can probe the reset allowance.
+
+Meridian sends one redemption POST and does not retry it automatically.
+Transport failures or invalid responses after dispatch can return
+`indeterminate: true`: the reset may have been consumed even though the response
+was lost. Re-read quota and confirm the outcome before another intentional
+attempt. Keep the original request ID if reconciling that operation; do not
+generate a new one as an automatic retry. Claude's client reuses IDs after
+uncertain outcomes, but this is not a guarantee of server-side deduplication.
+
+
 ## Reading Token and Cache Metrics
 
 The SDK separates uncached input, cache reads, and cache creation. Meridian calculates:
