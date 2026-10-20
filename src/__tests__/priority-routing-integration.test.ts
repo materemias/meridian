@@ -2286,7 +2286,7 @@ describe("priority cooldown resolution", () => {
   it("refines a default-length mark with the authoritative OAuth reset", async () => {
     __setFetchOAuthUsageOverride(async (opts) => {
       if (opts?.profileId !== "work") return null
-      return { windows: [{ type: "five_hour", utilization: 1, resetsAt: WORK_RESET }], extraUsage: null, fetchedAt: Date.now() }
+      return { windows: [{ type: "five_hour", utilization: 1, resetsAt: WORK_RESET }], extraUsage: null, bankedResets: null, fetchedAt: Date.now() }
     })
     failingDirs.add("prof-work")
     const app = createTestApp()
@@ -2339,7 +2339,7 @@ describe("priority cooldown resolution", () => {
     __setFetchOAuthUsageOverride(async (opts) => {
       attempted.push(opts?.profileId)
       if (opts?.profileId !== "work") return null
-      return { windows: [{ type: "five_hour", utilization: 1, resetsAt: WORK_RESET }], extraUsage: null, fetchedAt: Date.now() }
+      return { windows: [{ type: "five_hour", utilization: 1, resetsAt: WORK_RESET }], extraUsage: null, bankedResets: null, fetchedAt: Date.now() }
     })
     failingDirs.add("prof-work")
     const app = createTestApp()
@@ -2360,6 +2360,7 @@ describe("priority cooldown resolution", () => {
     __setFetchOAuthUsageOverride(async () => ({
       windows: [{ type: "five_hour", utilization: 1, resetsAt: PERSONAL_RESET }],
       extraUsage: null,
+      bankedResets: null,
       fetchedAt: Date.now(),
     }))
     failingDirs.add("prof-work")
@@ -2412,7 +2413,7 @@ describe("priority cooldown resolution", () => {
     const futureReset = Date.now() + 3 * 60 * 60_000 // comfortably in the future, well under the 6h cap
     __setFetchOAuthUsageOverride(async (opts) => {
       if (opts?.profileId !== "work") return null
-      return { windows: [{ type: "five_hour", utilization: 0.2, resetsAt: futureReset }], extraUsage: null, fetchedAt: Date.now() }
+      return { windows: [{ type: "five_hour", utilization: 0.2, resetsAt: futureReset }], extraUsage: null, bankedResets: null, fetchedAt: Date.now() }
     })
     failingDirs.add("prof-work")
     const app = createTestApp()
@@ -2451,7 +2452,7 @@ describe("priority cooldown resolution", () => {
     const farReset = Date.now() + 12 * 60 * 60_000 // 12h out — beyond the 6h cap
     __setFetchOAuthUsageOverride(async (opts) => {
       if (opts?.profileId !== "work") return null
-      return { windows: [{ type: "five_hour", utilization: 1, resetsAt: farReset }], extraUsage: null, fetchedAt: Date.now() }
+      return { windows: [{ type: "five_hour", utilization: 1, resetsAt: farReset }], extraUsage: null, bankedResets: null, fetchedAt: Date.now() }
     })
     failingDirs.add("prof-work")
     const app = createTestApp()

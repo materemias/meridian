@@ -11300,6 +11300,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
           type,
           windows: [] as any[],
           extraUsage: null,
+          bankedResets: null,
           fetchedAt: null,
           stale: false,
           error: "not_oauth" as const,

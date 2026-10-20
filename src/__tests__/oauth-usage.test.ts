@@ -22,6 +22,10 @@ const SAMPLE_RESPONSE = {
   seven_day_omelette: { utilization: 1.0, resets_at: "2026-05-03T17:00:00.221883+00:00" },
   iguana_necktie: null,
   omelette_promotional: null,
+  cedar_ember: {
+    eligible: true,
+    grants: [{ id: "sample-reset", resets_left: 1, ends_at: "2026-11-01T00:00:00Z" }],
+  },
   extra_usage: {
     is_enabled: true,
     monthly_limit: 0,
@@ -85,6 +89,83 @@ describe("oauthUsage", () => {
     const sevenDay = result!.windows.find(w => w.type === "seven_day")
     expect(sevenDay).toBeDefined()
     expect(sevenDay!.utilization).toBeCloseTo(0.05, 5)
+    expect(result?.bankedResets).toEqual({
+      eligible: true,
+      grants: [{ id: "sample-reset", resetsLeft: 1, expiresAt: Date.parse("2026-11-01T00:00:00Z") }],
+    })
+  })
+
+  test("keeps every valid grant, including exhausted, paused, future and expired inventory", async () => {
+    const fetchImpl = fixedFetch(() => Response.json({
+      cedar_ember: {
+        eligible: true,
+        grants: [
+          { id: "expired", resets_left: 0, ends_at: "2020-01-01T00:00:00Z" },
+          { id: "paused", resets_left: 2, paused: true, ends_at: "2030-01-01T03:30:00+03:30" },
+          { id: "future", resets_left: Number.MAX_SAFE_INTEGER, starts_at: "2090-01-01T00:00:00Z", ends_at: "2091-01-01T00:00:00" },
+          { id: 7, resets_left: 1 },
+          { resets_left: 3, ends_at: "not-a-date" },
+          { resets_left: 4, ends_at: 123 },
+          { resets_left: 5, ends_at: "2030-01-01T00:00:00-05:00" },
+        ],
+      },
+    }))
+    const result = await fetchOAuthUsage({ force: true, store: makeStore("t"), fetchImpl })
+    expect(result?.bankedResets?.grants).toEqual([
+      { id: "expired", resetsLeft: 0, expiresAt: Date.UTC(2020, 0, 1) },
+      { id: "paused", resetsLeft: 2, expiresAt: Date.UTC(2030, 0, 1) },
+      { id: "future", resetsLeft: Number.MAX_SAFE_INTEGER, expiresAt: Date.UTC(2091, 0, 1) },
+      { id: null, resetsLeft: 1, expiresAt: null },
+      { id: null, resetsLeft: 3, expiresAt: null },
+      { id: null, resetsLeft: 4, expiresAt: null },
+      { id: null, resetsLeft: 5, expiresAt: Date.UTC(2030, 0, 1, 5) },
+    ])
+  })
+
+  test("skips malformed grants rather than inventing reset counts", async () => {
+    const fetchImpl = fixedFetch(() => Response.json({
+      cedar_ember: { eligible: true, grants: [
+        null, 1, "grant", [], {}, { resets_left: null }, { resets_left: "1" },
+        { resets_left: -1 }, { resets_left: 0.5 }, { resets_left: Number.MAX_SAFE_INTEGER + 1 },
+        { resets_left: 0 },
+      ] },
+    }))
+    const result = await fetchOAuthUsage({ force: true, store: makeStore("t"), fetchImpl })
+    expect(result?.bankedResets).toEqual({
+      eligible: true, grants: [{ id: null, resetsLeft: 0, expiresAt: null }],
+    })
+  })
+
+  test("distinguishes unavailable blocks from valid ineligible inventory", async () => {
+    for (const cedar_ember of [undefined, null, false, [], {}, { eligible: "true", grants: [] },
+      { eligible: true }, { eligible: true, grants: {} }]) {
+      const result = await fetchOAuthUsage({
+        force: true, store: makeStore("t"),
+        fetchImpl: fixedFetch(() => Response.json({ cedar_ember })),
+      })
+      expect(result?.bankedResets).toBeNull()
+    }
+    const result = await fetchOAuthUsage({
+      force: true, store: makeStore("t"),
+      fetchImpl: fixedFetch(() => Response.json({ cedar_ember: { eligible: false, grants: [] } })),
+    })
+    expect(result?.bankedResets).toEqual({ eligible: false, grants: [] })
+  })
+
+  test("retains cached and stale reset inventory without leaking it across profiles", async () => {
+    const { fetchImpl, getCalls } = countingFetch(calls => calls === 1
+      ? Response.json(SAMPLE_RESPONSE) : new Response("boom", { status: 500 }))
+    const opts = { store: makeStore("t"), profileId: "banked-work", fetchImpl }
+    const fresh = await fetchOAuthUsage(opts)
+    const cached = await fetchOAuthUsage(opts)
+    expect(getCalls()).toBe(1)
+    expect(cached?.bankedResets).toEqual(fresh?.bankedResets)
+    const stale = await fetchOAuthUsage({ ...opts, force: true })
+    expect(stale?.stale).toBe(true)
+    expect(stale?.bankedResets).toEqual(fresh?.bankedResets)
+    const other = await fetchOAuthUsage({ ...opts, profileId: "banked-personal", force: true })
+    expect(other).toBeNull()
+    expect(peekOAuthUsage("banked-personal")).toBeUndefined()
   })
 
   test("parses model-scoped weekly limits without duplicating aggregate windows", async () => {
@@ -601,6 +682,7 @@ describe("toUsageEntry", () => {
     }))
 
     expect(entry.windows).toEqual([])
+    expect(entry.bankedResets).toBeNull()
     expect(entry.fetchedAt).toBeNull()
     expect(entry.stale).toBe(false)
     expect(entry.error).toBe("no_token")
@@ -638,6 +720,7 @@ describe("toUsageEntry", () => {
 
     const entry = toUsageEntry(aged)
     expect(entry.windows).toEqual(good.snapshot!.windows)
+    expect(entry.bankedResets).toEqual(good.snapshot?.bankedResets ?? null)
     expect(entry.fetchedAt).toBe(good.snapshot!.fetchedAt)
     expect(entry.stale).toBe(true)
     expect(entry.error).toBe("upstream_error")

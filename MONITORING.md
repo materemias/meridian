@@ -23,6 +23,35 @@ The default URL is `http://127.0.0.1:3456`. Protected routes require `x-api-key`
 - Read utilization together with the reset time and snapshot freshness. An unavailable or stale value is **not zero usage**. `no_token`, `rate_limited`, and `upstream_error` mean different things; an API-key profile may report `not_oauth`.
 - Quota reads use a cached upstream OAuth endpoint (normally a 30-second cache), not a local conversion from tokens to subscription percentage. SDK rate-limit events provide additional information when available. Frequent polling cannot make missing upstream data authoritative.
 
+Claude profiles in `/v1/usage/quota/all` also include `bankedResets`:
+
+```json
+{
+  "bankedResets": {
+    "eligible": true,
+    "grants": [
+      {
+        "id": "example-reset-grant",
+        "resetsLeft": 1,
+        "expiresAt": 1792684800000
+      }
+    ]
+  }
+}
+```
+
+Each grant keeps its own remaining reset count and expiration date.
+`expiresAt` is Unix epoch milliseconds, or `null` when the date is unknown.
+`id` is the provider's grant identifier, or `null` when unavailable.
+The list preserves provider inventory, including exhausted, paused,
+not-yet-started and expired grants. It is not a count of resets usable now,
+and `eligible` does not establish that a particular grant can be used.
+`bankedResets: null` means reset information is unavailable, including for
+non-OAuth profiles. A valid empty `grants` list means the provider returned
+no grants. Read reset data with the profile's `fetchedAt`, `stale` and `failure`
+fields, just like its usage windows. This endpoint only lists grants; it
+does not redeem them.
+
 Subscription limits, context occupancy, and API-equivalent cost are different measures. A cache hit does not mean zero subscription usage, and a large context window does not mean that much quota remains.
 
 ## Reading Token and Cache Metrics

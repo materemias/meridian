@@ -28,7 +28,7 @@ import { isCredentialsReadOnly } from "./credentialsMode"
 import { parseRetryAfterMs } from "./retryAfter"
 import { createPlatformCredentialStore, refreshOAuthToken, type CredentialStore } from "./tokenRefresh"
 
-const OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+const OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1"
 const OAUTH_BETA_HEADER = "oauth-2025-04-20"
 
 /** Raw shape returned by Anthropic. Most fields are optional/nullable. */
@@ -69,6 +69,7 @@ interface RawOAuthUsageResponse {
   omelette_promotional?: RawOAuthWindow | null
   limits?: RawOAuthLimit[] | null
   extra_usage?: RawOAuthExtraUsage | null
+  cedar_ember?: unknown
 }
 
 export interface OAuthUsageWindow {
@@ -85,9 +86,21 @@ export interface OAuthExtraUsageInfo {
   currency: string
 }
 
+export interface OAuthBankedResetGrant {
+  id: string | null
+  resetsLeft: number
+  expiresAt: number | null
+}
+
+export interface OAuthBankedResets {
+  eligible: boolean
+  grants: OAuthBankedResetGrant[]
+}
+
 export interface OAuthUsageSnapshot {
   windows: OAuthUsageWindow[]
   extraUsage: OAuthExtraUsageInfo | null
+  bankedResets: OAuthBankedResets | null
   fetchedAt: number
   /** Set when this is a previous snapshot served because a fresh fetch
    *  failed transiently (credential-read blip, upstream error). */
@@ -152,6 +165,7 @@ export interface OAuthUsageResult extends RawUsageResult {
 export interface UsageEntryFields {
   windows: OAuthUsageWindow[]
   extraUsage: OAuthExtraUsageInfo | null
+  bankedResets: OAuthBankedResets | null
   fetchedAt: number | null
   /** True when the figures are a previous reading rather than one taken by the
    *  check that just ran. */
@@ -178,6 +192,7 @@ export function toUsageEntry(result: OAuthUsageResult): UsageEntryFields {
   return {
     windows: shown?.windows ?? [],
     extraUsage: shown?.extraUsage ?? null,
+    bankedResets: shown?.bankedResets ?? null,
     fetchedAt: shown?.fetchedAt ?? null,
     stale: shown != null && (result.snapshot === null || result.snapshot.stale === true),
     error: result.error,
@@ -251,6 +266,33 @@ function parseIsoToMs(raw: string | null | undefined): number | null {
   return Number.isFinite(ms) ? ms : null
 }
 
+function parseBankedResets(raw: unknown): OAuthBankedResets | null {
+  if (typeof raw !== "object" || raw === null || !("eligible" in raw) || typeof raw.eligible !== "boolean"
+    || !("grants" in raw) || !Array.isArray(raw.grants)) return null
+
+  const grants: OAuthBankedResetGrant[] = []
+  const rawGrants: unknown[] = raw.grants
+  for (const grant of rawGrants) {
+    if (typeof grant !== "object" || grant === null || !("resets_left" in grant)
+      || typeof grant.resets_left !== "number" || !Number.isSafeInteger(grant.resets_left) || grant.resets_left < 0) continue
+
+    let expiresAt: number | null = null
+    if ("ends_at" in grant && typeof grant.ends_at === "string") {
+      const date = grant.ends_at
+      // Provider timestamps without an offset are UTC, never the host's timezone.
+      if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?$/i.test(date)) {
+        expiresAt = parseIsoToMs(/(?:Z|[+-]\d{2}:\d{2})$/i.test(date) ? date : `${date}Z`)
+      }
+    }
+    grants.push({
+      id: "id" in grant && typeof grant.id === "string" ? grant.id : null,
+      resetsLeft: grant.resets_left,
+      expiresAt,
+    })
+  }
+  return { eligible: raw.eligible, grants }
+}
+
 function normalizeUtilization(raw: number | null | undefined): number | null {
   if (typeof raw !== "number" || !Number.isFinite(raw)) return null
   // OAuth returns 0..100. Normalize to 0..1 to match SDK rate_limit_event.
@@ -307,7 +349,7 @@ function buildSnapshot(raw: RawOAuthUsageResponse): OAuthUsageSnapshot {
       }
     : null
 
-  return { windows, extraUsage, fetchedAt: Date.now() }
+  return { windows, extraUsage, bankedResets: parseBankedResets(raw.cedar_ember), fetchedAt: Date.now() }
 }
 
 async function readAccessToken(store: CredentialStore): Promise<string | null> {
@@ -378,6 +420,7 @@ async function callAnthropic(
       Authorization: `Bearer ${token}`,
       "anthropic-beta": OAUTH_BETA_HEADER,
       Accept: "application/json",
+      "User-Agent": "claude-cli/2.1.280 (external, cli)",
     },
     signal: signal ?? AbortSignal.timeout(10_000),
   })
