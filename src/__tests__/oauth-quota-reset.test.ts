@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { clearOAuthUsageForProfile, fetchOAuthUsage, peekOAuthUsage, redeemOAuthQuotaReset, resetOAuthUsageCache } from "../proxy/oauthUsage"
+import { clearOAuthUsageForProfile, fetchOAuthUsage, fetchOAuthUsageResult, peekOAuthUsage, redeemOAuthQuotaReset, resetOAuthUsageCache } from "../proxy/oauthUsage"
 import type { CredentialStore } from "../proxy/tokenRefresh"
 
 const input = { profile: "work", grantId: "grant_1", requestId: "Request-1" }
@@ -24,7 +24,7 @@ describe("explicit OAuth quota redemption", () => {
   test("missing token prevents all network calls", async () => {
     let calls = 0
     const result = await redeemOAuthQuotaReset(input, { ...options, store: { async read() { return null }, async write() { return false } }, fetchImpl: async () => { calls++; return Response.json({}) } })
-    expect(result).toMatchObject({ ok: false, code: "no_token" })
+    expect(result).toMatchObject({ ok: false, status: 503, code: "no_token", indeterminate: false })
     expect(calls).toBe(0)
   })
 
@@ -63,17 +63,47 @@ describe("explicit OAuth quota redemption", () => {
     expect(result).toMatchObject({ ok: false, code: "reset_indeterminate", indeterminate: true })
   })
 
-  test("unknown results and malformed outcome fields are not successful", async () => {
-    for (const body of [{ result: "future" }, { result: "reset", resets_left: -1 }, { result: "reset", weekly_resets_at: "not-a-date" }, { result: "cooldown", cooldown_until: "not-a-date" }, { result: "reset", cleared: [42] }]) {
-      const result = await redeemOAuthQuotaReset(input, { ...options, fetchImpl: async (_url, init) => Response.json(init?.method === "POST" ? body : { organization: { uuid: org } }) })
+  test("unknown or missing primary results and invalid JSON remain indeterminate", async () => {
+    for (const response of [() => Response.json({ result: "future" }), () => Response.json({}), () => Response.json(null), () => new Response("not json")]) {
+      const result = await redeemOAuthQuotaReset(input, { ...options, fetchImpl: async (_url, init) =>
+        init?.method === "POST" ? response() : Response.json({ organization: { uuid: org } }),
+      })
       expect(result).toMatchObject({ ok: false, code: "invalid_response", indeterminate: true })
     }
   })
 
-  test("semantic nonreset outcomes do not clear cached usage", async () => {
+  test("malformed informational metadata cannot obscure a confirmed reset", async () => {
+    const result = await redeemOAuthQuotaReset(input, { ...options, fetchImpl: async (_url, init) =>
+      Response.json(init?.method === "POST" ? {
+        result: "reset", reason: 42, resets_left: -1, cleared: null,
+        weekly_resets_at: "2030-01-01T00:00:00", cooldown_until: "bad",
+      } : { organization: { uuid: org } }),
+    })
+    expect(result).toEqual({ ok: true, outcome: {
+      result: "reset", reason: null, resetsLeft: null, cleared: [],
+      weeklyResetsAt: Date.UTC(2030, 0, 1), cooldownUntil: null,
+    } })
+  })
+
+  test("metadata normalization preserves only valid counts, strings and dates", async () => {
+    for (const resets_left of [undefined, null, "2", 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      const result = await redeemOAuthQuotaReset(input, { ...options, fetchImpl: async (_url, init) =>
+        Response.json(init?.method === "POST" ? {
+          result: "cooldown", reason: "wait", resets_left, cleared: [42, "five_hour", null, "seven_day"],
+          weekly_resets_at: {}, cooldown_until: "2030-01-01T02:00:00+02:00",
+        } : { organization: { uuid: org } }),
+      })
+      expect(result).toEqual({ ok: true, outcome: {
+        result: "cooldown", reason: "wait", resetsLeft: null, cleared: ["five_hour", "seven_day"],
+        weeklyResetsAt: null, cooldownUntil: Date.UTC(2030, 0, 1),
+      } })
+    }
+  })
+
+  test("nonreset outcomes without inventory changes preserve cached usage", async () => {
     await fetchOAuthUsage({ ...options, fetchImpl: async () => Response.json({ five_hour: { utilization: 100 } }) })
     const cached = peekOAuthUsage("work")
-    for (const outcome of ["already_used", "not_limited", "cooldown", "ineligible", "unavailable"]) {
+    for (const outcome of ["not_limited", "cooldown", "ineligible", "unavailable"]) {
       const result = await redeemOAuthQuotaReset(input, { ...options, fetchImpl: async (_url, init) => Response.json(init?.method === "POST" ? { result: outcome } : { organization: { uuid: org } }) })
       expect(result).toMatchObject({ ok: true, outcome: { result: outcome } })
       expect(peekOAuthUsage("work")).toBe(cached)
@@ -83,6 +113,31 @@ describe("explicit OAuth quota redemption", () => {
     })
     expect(cooldown).toMatchObject({ ok: true, outcome: { result: "cooldown", cooldownUntil: Date.parse("2026-11-01T00:00:00Z") } })
     expect(peekOAuthUsage("work")).toBe(cached)
+  })
+
+  test("already-used grants invalidate selected and default-alias inventory but not other profiles", async () => {
+    for (const profileId of ["work", undefined]) {
+      const usage = { cedar_ember: { eligible: true, grants: [{ id: "grant_1", resets_left: 1 }] } }
+      await fetchOAuthUsage({ ...options, profileId, fetchImpl: async () => Response.json(usage) })
+      if (profileId === undefined) await fetchOAuthUsage({ ...options, profileId: "default", fetchImpl: async () => Response.json(usage) })
+      await fetchOAuthUsage({ ...options, profileId: "other", fetchImpl: async () => Response.json(usage) })
+      const other = peekOAuthUsage("other")
+      const result = await redeemOAuthQuotaReset({ ...input, profile: profileId ?? "default" }, {
+        ...options, profileId, fetchImpl: async (_url, init) =>
+          Response.json(init?.method === "POST" ? { result: "already_used" } : { organization: { uuid: org } }),
+      })
+      expect(result).toMatchObject({ ok: true, outcome: { result: "already_used" } })
+      expect(peekOAuthUsage(profileId)).toBeUndefined()
+      if (profileId === undefined) expect(peekOAuthUsage("default")).toBeUndefined()
+      expect(peekOAuthUsage("other")).toBe(other)
+      let reads = 0
+      const refreshed = await fetchOAuthUsage({ ...options, profileId, fetchImpl: async () => {
+        reads++
+        return Response.json({ cedar_ember: { eligible: true, grants: [] } })
+      } })
+      expect(reads).toBe(1)
+      expect(refreshed?.bankedResets?.grants).toEqual([])
+    }
   })
 
   test("confirmed and uncertain mutations invalidate only the selected account, including unscoped default", async () => {
@@ -122,12 +177,12 @@ describe("explicit OAuth quota redemption", () => {
     expect(peekOAuthUsage()).toBe(unscoped)
   })
 
-  test("a late pre-invalidation GET cannot repopulate cache or remove a newer in-flight read", async () => {
+  test("late pre-invalidation callers join the replacement read without phantom failures", async () => {
     const oldResponse = Promise.withResolvers<Response>()
     const newResponse = Promise.withResolvers<Response>()
     const oldStarted = Promise.withResolvers<void>()
     const newStarted = Promise.withResolvers<void>()
-    const old = fetchOAuthUsage({ ...options, fetchImpl: async () => {
+    const old = fetchOAuthUsageResult({ ...options, fetchImpl: async () => {
       oldStarted.resolve()
       return oldResponse.promise
     } })
@@ -139,15 +194,46 @@ describe("explicit OAuth quota redemption", () => {
       newStarted.resolve()
       return newResponse.promise
     }
-    const fresh = fetchOAuthUsage({ ...options, fetchImpl })
+    const fresh = fetchOAuthUsageResult({ ...options, fetchImpl })
     await newStarted.promise
     oldResponse.resolve(Response.json({ five_hour: { utilization: 100 } }))
-    await old
     expect(peekOAuthUsage("work")).toBeUndefined()
-    const shared = fetchOAuthUsage({ ...options, fetchImpl })
+    const shared = fetchOAuthUsageResult({ ...options, fetchImpl })
     expect(newCalls).toBe(1)
     newResponse.resolve(Response.json({ five_hour: { utilization: 0 } }))
-    await Promise.all([fresh, shared])
+    const results = await Promise.all([old, fresh, shared])
+    for (const result of results) {
+      expect(result.snapshot?.windows[0]?.utilization).toBe(0)
+      expect(result.error).toBeNull()
+      expect(result.failure).toBeNull()
+      expect(result.lastGood).toBe(result.snapshot)
+    }
+    expect(newCalls).toBe(1)
     expect(peekOAuthUsage("work")?.windows[0]?.utilization).toBe(0)
+  })
+
+  test("a superseded caller starts one current read when no replacement exists", async () => {
+    const oldResponse = Promise.withResolvers<Response>()
+    const started = Promise.withResolvers<void>()
+    let calls = 0
+    const old = fetchOAuthUsageResult({ ...options, fetchImpl: async () => {
+      calls++
+      if (calls === 1) {
+        started.resolve()
+        return oldResponse.promise
+      }
+      return Response.json({ five_hour: { utilization: 12 } })
+    } })
+    await started.promise
+    clearOAuthUsageForProfile("work")
+    oldResponse.resolve(Response.json({ five_hour: { utilization: 100 } }))
+    const result = await old
+    expect(calls).toBe(2)
+    expect(result.snapshot?.windows[0]?.utilization).toBe(0.12)
+    expect(result.error).toBeNull()
+    expect(result.failure).toBeNull()
+    expect(result.lastGood).toBe(result.snapshot)
+    expect(result.snapshot).not.toBeNull()
+    expect(peekOAuthUsage("work")).toBe(result.snapshot ?? undefined)
   })
 })

@@ -70,7 +70,9 @@ It is an explicit action, not a quota poll or health check. Send a JSON object:
 All three fields are required. Use the profile and grant IDs from
 `/v1/usage/quota/all`; there is no active-profile or next-grant fallback.
 Use `profile: "default"` for the single-account entry when no profiles are
-configured. API-key profiles cannot redeem Claude grants.
+configured. API-key and static token-only profiles cannot redeem Claude grants
+and report `not_oauth`; token-only profiles also cannot read the host account's
+grant inventory under their own profile ID.
 `grantId` accepts 1–40 lowercase letters, digits, underscores or hyphens.
 `requestId` accepts 1–64 letters, digits, underscores or hyphens.
 Generate a request ID once per intentional redemption and retain it with
@@ -84,9 +86,20 @@ A parsed provider response returns HTTP 200 with the requested IDs and
 `result`, `reason`, `resetsLeft`, `cleared`, `weeklyResetsAt` and `cooldownUntil`.
 Only `result: "reset"` confirms redemption. Other results are `already_used`,
 `not_limited`, `cooldown`, `ineligible` and `unavailable`.
-Times are epoch milliseconds, or `null` when unavailable.
-A confirmed reset invalidates the selected account's cached usage and stale
-routing/SDK health so its next request can probe the reset allowance.
+Times are epoch milliseconds, or `null` when unavailable; timezone-free provider
+timestamps are UTC. Invalid optional metadata becomes unknown without hiding
+a confirmed `result: "reset"`.
+Confirmed resets and `already_used` outcomes invalidate the selected account's
+cached usage. Superseded quota polls join the current read rather than reporting
+a false upstream failure.
+
+Only a confirmed reset clears local SDK windows explicitly listed in `cleared`
+and matching reported refusal state. Uncleared weekly/model limits and independent
+overage metadata survive. Unknown, non-quota and unrelated routing exclusions
+remain conservative; an uncertain outcome never erases known refusal state.
+
+Missing upstream OAuth credentials return HTTP 503 with `code: "no_token"`.
+HTTP 401 remains the Meridian API-key authentication failure.
 
 Meridian sends one redemption POST and does not retry it automatically.
 Transport failures or invalid responses after dispatch can return

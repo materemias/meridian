@@ -395,6 +395,34 @@ describe("GET /v1/usage/quota/all — null attribution", () => {
     expect(body.profiles.find(p => p.id === "api")?.bankedResets).toBeNull()
     expect(body.profiles.find(p => p.id === "api")?.error).toBe("not_oauth")
   })
+  it("does not attribute OAuth usage or banked grants to inferred token profiles", async () => {
+    const usage = mock(async () => ({
+      windows: [{ type: "five_hour", utilization: 0.5, resetsAt: null }],
+      extraUsage: null,
+      bankedResets: { eligible: true, grants: [{ id: "host-grant", resetsLeft: 1, expiresAt: null }] },
+      fetchedAt: 1_730_000_000_000,
+    }))
+    __setFetchOAuthUsageOverride(usage)
+    const { app } = createProxyServer({
+      port: 0, host: "127.0.0.1",
+      profiles: [
+        { id: "inferred", oauthToken: "fake-inferred-token" },
+        { id: "mislabelled", type: "claude-max", oauthToken: "fake-mislabelled-token" },
+      ],
+    })
+    const all = await app.fetch(new Request("http://localhost/v1/usage/quota/all"))
+    const body = await all.json() as { profiles: Array<{ id: string; type: string; error: string; bankedResets: unknown }> }
+    expect(body.profiles).toEqual([
+      expect.objectContaining({ id: "inferred", type: "oauth-token", error: "not_oauth", bankedResets: null }),
+      expect.objectContaining({ id: "mislabelled", type: "oauth-token", error: "not_oauth", bankedResets: null }),
+    ])
+    for (const profile of ["inferred", "mislabelled", "missing"]) {
+      const single = await app.fetch(new Request(`http://localhost/v1/usage/quota?profile=${profile}`))
+      expect(single.status).toBe(200)
+      expect(await single.json()).toMatchObject({ buckets: [], extraUsage: null, sources: { oauth: null } })
+    }
+    expect(usage).not.toHaveBeenCalled()
+  })
 })
 
 async function primeRateLimit(profileId: string | undefined): Promise<void> {

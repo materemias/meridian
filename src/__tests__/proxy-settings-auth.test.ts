@@ -100,6 +100,23 @@ describe("quota reset boundary rejects before credential access", () => {
       expect(await response.json()).toMatchObject({ code })
     }
   })
+  it("rejects token profiles even when their raw type is absent or claims claude-max", async () => {
+    const { app } = createProxyServer({
+      port: 0, host: "127.0.0.1",
+      profiles: [
+        { id: "inferred", oauthToken: "fake-inferred-token" },
+        { id: "mislabelled", type: "claude-max", oauthToken: "fake-mislabelled-token" },
+      ],
+    })
+    for (const profile of ["inferred", "mislabelled"]) {
+      const response = await app.fetch(new Request("http://localhost/v1/usage/quota/reset", {
+        method: "POST", headers: { Authorization: `Bearer ${TEST_KEY}` },
+        body: JSON.stringify({ profile, grantId: "grant", requestId: "request" }),
+      }))
+      expect(response.status).toBe(400)
+      expect(await response.json()).toMatchObject({ code: "not_oauth" })
+    }
+  })
 })
 
 describe("MERIDIAN_API_KEY — /settings/api/* (regression for #477)", () => {

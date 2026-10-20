@@ -75,6 +75,28 @@ describe("oauthUsage", () => {
     expect(result).toBeNull()
   })
 
+  test("a superseded failed forced read returns the current cached snapshot without another fetch", async () => {
+    const oldResponse = Promise.withResolvers<Response>()
+    const started = Promise.withResolvers<void>()
+    let oldCalls = 0
+    const opts = { store: makeStore("fake-token"), profileId: "reconciled" }
+    const old = fetchOAuthUsageResult({ ...opts, force: true, fetchImpl: async () => {
+      oldCalls++
+      started.resolve()
+      return oldResponse.promise
+    } })
+    await started.promise
+    clearOAuthUsageForProfile("reconciled")
+    const fresh = await fetchOAuthUsageResult({ ...opts, fetchImpl: async () => Response.json({ five_hour: { utilization: 7 } }) })
+    oldResponse.reject(new Error("Synthetic superseded read failure"))
+    const reconciled = await old
+    expect(reconciled.snapshot).toBe(fresh.snapshot)
+    expect(reconciled.error).toBeNull()
+    expect(reconciled.failure).toBeNull()
+    expect(reconciled.lastGood).toBe(fresh.snapshot)
+    expect(oldCalls).toBe(1)
+  })
+
   test("parses sample response into normalized shape", async () => {
     const fetchImpl = fixedFetch(() => new Response(JSON.stringify(SAMPLE_RESPONSE), { status: 200 }))
     const result = await fetchOAuthUsage({ force: true, store: makeStore("token"), fetchImpl })
