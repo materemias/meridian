@@ -150,7 +150,9 @@ import { resolveProfile, listProfiles, setActiveProfile, getActiveProfileId, res
 import { followStatus, startFollowPolling, stopFollowPolling, logFollowBanner, FOLLOW_POLL_INTERVAL_MS } from "./followActive"
 import { createChatGptLogin } from "./chatgpt/login"
 import { renderLoginCallbackPage } from "../telemetry/loginCallbackPage"
-import { organizationNames, organizationNeedsRefresh, refreshOrganizationNameSoon } from "./organizationName"
+import { organizationNames, organizationNeedsRefresh, organizationRecordCurrent, organizationLookupEnabled, refreshOrganizationNameSoon, refreshOrganizationNow, type OrganizationRecord } from "./organizationName"
+import { findDuplicateProfiles, type IdentifiedProfile } from "./duplicateProfiles"
+import { ProfileFactsRefresh } from "./profileFactsRefresh"
 import {
   getRoutingMode,
   classifyRouteKind,
@@ -1416,6 +1418,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
   // percentages of its last successful read (measured: `5h 67% / 7d 7%` while
   // every request through it was being refused).
   const spentProfiles = new SpentStore()
+  const profileFactsRefresh = new ProfileFactsRefresh()
   const failoverEvents = new FailoverEventLog()
 
   function priorityProfileOrderSetting(): string[] | undefined {
@@ -10057,6 +10060,9 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
   app.get("/profiles/list", async (c) => {
     const profiles = listProfiles(finalConfig.profiles, finalConfig.defaultProfile)
     const organizations = organizationNames()
+    // Account records read for the credential each Claude profile holds now;
+    // see organizationRecordCurrent.
+    const currentAccounts = new Map<string, OrganizationRecord>()
     const expiryObservedAt = Date.now()
     const renewalWarnDays = resolveRenewalWarnDays(process.env.MERIDIAN_AUTH_RENEWAL_WARN_DAYS)
     // Enrich with live auth status
@@ -10069,13 +10075,6 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
       )
       const cacheInfo = getAuthCacheInfo(p.id !== "default" ? p.id : undefined)
       const organization = organizations[p.id]
-      // Only claude-max profiles have an OAuth account to ask about, and only
-      // their credentials are a directory this can name — an API-key profile
-      // would otherwise be looked up against the host's own ~/.claude and
-      // labelled with an unrelated organization.
-      if (resolved.type === "claude-max" && organizationNeedsRefresh(organization, Date.now())) {
-        refreshOrganizationNameSoon(p.id, { claudeConfigDir: resolved.env.CLAUDE_CONFIG_DIR })
-      }
       // The tier that sizes the plan is never in `claude auth status` — only
       // the family (`max`), which covers both 5x and 20x. It is on disk, in
       // the profile's own credential file.
@@ -10105,10 +10104,27 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
       // empty stored OAuth grant cannot invalidate those credentials.
       const stored = profileStore ? await readStoredCredentialSnapshot(profileStore) : undefined
       const presence = stored?.presence ?? "unknown"
+      // Only claude-max profiles have an OAuth account to ask about, and only
+      // their credentials are a directory this can name — an API-key profile
+      // would otherwise be looked up against the host's own ~/.claude and
+      // labelled with an unrelated organization. The stored access token's
+      // expiry marks which credential a record was read for, so a login or a
+      // renewal re-reads the account instead of keeping the previous one's.
+      const credentialMark = stored?.accessTokenExpiresAt ?? null
+      if (resolved.type === "claude-max" && organizationNeedsRefresh(organization, Date.now(), undefined, credentialMark)) {
+        refreshOrganizationNameSoon(p.id, { claudeConfigDir: resolved.env.CLAUDE_CONFIG_DIR, credentialMark })
+      }
+      // `claude auth status` reads the email Claude Code last cached, which a
+      // login Meridian performed does not touch - so it keeps naming the
+      // account signed in before. A read made for this very credential knows.
+      const accountCurrent = resolved.type === "claude-max" && organization !== undefined
+        && organizationRecordCurrent(organization, credentialMark)
+      if (accountCurrent) currentAccounts.set(p.id, organization)
+      const email = (accountCurrent ? organization.email : null) || auth?.email || null
       const renewal = renewalStatusFor(stored?.refreshTokenExpiresAt, renewalWarnDays, expiryObservedAt)
       return {
         ...p,
-        email: auth?.email || null,
+        email,
         subscriptionType: auth?.subscriptionType || null,
         organizationName: organization?.name ?? null,
         rateLimitTier: plan.rateLimitTier ?? null,
@@ -10158,8 +10174,32 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
     // from and why switching is refused. Absent unless MERIDIAN_FOLLOW_ACTIVE.
     const follow = followStatus(profiles.map(p => p.id))
     const claudeActiveProfile = resolveActiveProfileId(profiles.map(p => p.id)) || finalConfig.defaultProfile || profiles[0]?.id || "default"
+    const listed = chatGptProfiles ? [...enriched, ...chatGptProfiles.listEntries()] : enriched
+    const duplicates = findDuplicateProfiles(listed.map((entry): IdentifiedProfile => {
+      if ("seat" in entry && typeof entry.seat === "string") {
+        return { id: entry.id, identity: { provider: "chatgpt", seat: entry.seat, email: entry.email } }
+      }
+      const record = currentAccounts.get(entry.id)
+      if (!record) return { id: entry.id, identity: null }
+      return {
+        id: entry.id,
+        identity: {
+          provider: "claude",
+          accountUuid: record.accountUuid,
+          organizationUuid: record.organizationUuid,
+          email: entry.email,
+          organizationName: record.name,
+        },
+      }
+    }))
     return c.json({
-      profiles: chatGptProfiles ? [...enriched, ...chatGptProfiles.listEntries()] : enriched,
+      // Additive: `duplicateOf` names the other profiles signed in to the
+      // same account (one quota under two names), `[]` when there are none;
+      // `duplicateBasis` says what proved it. Present on every profile so a
+      // reader can tell "none" from an instance too old to say.
+      // `factsRefresh` (additive, null when idle): a sign-in finished and its
+      // facts are being re-read (`updating`), or that read failed (`failed`).
+      profiles: listed.map(entry => ({ ...entry, ...duplicates.get(entry.id), factsRefresh: profileFactsRefresh.view(entry.id) })),
       ...activeProfileFields(profiles.length > 0 ? claudeActiveProfile : null, claudeActiveProfile),
       // Additive (#383): current routing mode so UIs can surface it.
       routing: routingModeNow,
@@ -10329,6 +10369,14 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
       // seat on the next poll rather than after their own intervals.
       chatGptUsageAt = 0
       void chatGptCatalog?.refresh()
+      // The seat's card says it is updating until that usage read is in.
+      const seatProfileId = chatGptProfiles?.profileIdFor(account.accountUserId)
+      if (seatProfileId) {
+        void profileFactsRefresh.run(seatProfileId, async () => {
+          chatGptUsageAt = 0
+          await refreshChatGptUsage()
+        })
+      }
     },
     renderPage: (result) => renderLoginCallbackPage(result.ok
       ? { ok: true, okMessage: `ChatGPT seat${result.email ? ` ${result.email}` : ""} is connected to Meridian. You can close this tab.`, ...(result.returnTo ? { backHref: result.returnTo } : {}) }
@@ -10489,6 +10537,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
       const plan = chatGptProfiles.planRename(body.from, body.to)
       if (!plan.ok) return c.json({ error: plan.error }, 400)
       applyChatGptRename(plan)
+      profileFactsRefresh.forget(plan.from)
       claudeLog("profile.renamed", {
         from: plan.from,
         to: plan.to,
@@ -10517,6 +10566,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
     // applyProfileRename moved the persisted pointer; this process holds its
     // own copy in memory and has to be told as well.
     if (getActiveProfileId() === body.from) setActiveProfile(body.to)
+    profileFactsRefresh.forget(result.from)
     claudeLog("profile.renamed", {
       from: result.from,
       to: result.to,
@@ -10549,7 +10599,10 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
     }
     applyChatGptRemoval(seat, { moves: pointerMoves, to: successor?.seat })
     chatGptBackend?.forgetSeat(seat.seat)
-    for (const id of [seat.id, ...seat.aliases]) spentProfiles.forget(id)
+    for (const id of [seat.id, ...seat.aliases]) {
+      spentProfiles.forget(id)
+      profileFactsRefresh.forget(id)
+    }
     chatGptUsageAt = 0
     void chatGptCatalog?.refresh()
     claudeLog("profile.removed", {
@@ -10674,6 +10727,32 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
     }
   }
 
+  // A finished sign-in changes who the profile is (email, organization,
+  // account), its plan and its usage, and each is its own read. Re-read them
+  // now and say so on /profiles/list meanwhile, so the card shows it is
+  // updating instead of serving the previous login's facts as current ones.
+  // Started before the route answers: see ProfileFactsRefresh.run.
+  function refreshClaudeFactsAfterLogin(profileId: string, knownConfigDir?: string): void {
+    // resolveProfile falls back to the first profile for an id it does not
+    // know (a profile added while MERIDIAN_PROFILES pins the list), and that
+    // profile's credential must never be read for this one.
+    const resolved = resolveProfile(finalConfig.profiles, finalConfig.defaultProfile, profileId)
+    const env: Record<string, string> = resolved.id === profileId ? { ...resolved.env } : {}
+    if (knownConfigDir) env.CLAUDE_CONFIG_DIR = knownConfigDir
+    if (resolved.id !== profileId && !knownConfigDir) return
+    const claudeConfigDir = env.CLAUDE_CONFIG_DIR
+    void profileFactsRefresh.run(profileId, async () => {
+      const [record] = await Promise.all([
+        refreshOrganizationNow(profileId, { claudeConfigDir }),
+        fetchOAuthUsageResult({ profileId, claudeConfigDir, force: true }),
+        getInstanceAuthStatus(profileId, Object.keys(env).length > 0 ? env : undefined),
+      ])
+      if (!record && organizationLookupEnabled()) {
+        throw new Error("Signed in, but Anthropic has not said which account this is yet. The card catches up on its own within minutes.")
+      }
+    })
+  }
+
   app.post("/profiles/login/complete", async (c) => {
     let body: { loginId?: string; code?: string }
     try {
@@ -10698,6 +10777,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
     // drop it so /profiles/list reflects the login on the UI's next poll.
     expireAuthStatusCache()
     clearStaleProfileHealth(result.profileId)
+    refreshClaudeFactsAfterLogin(result.profileId)
     claudeLog("profile.login_completed", {
       profile: result.profileId,
       userAgent: c.req.header("user-agent")?.slice(0, 120) ?? null,
@@ -10730,6 +10810,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
     }
     expireAuthStatusCache()
     clearStaleProfileHealth(result.profileId)
+    refreshClaudeFactsAfterLogin(result.profileId)
     claudeLog("profile.login_completed", { profile: result.profileId, via: "callback" })
     plog(`[PROXY] Profile login completed for "${result.profileId}" (browser redirect)`)
     return c.html(renderLoginCallbackPage({ ok: true, profileId: result.profileId }))
@@ -10797,6 +10878,7 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
     // on the UI's next poll rather than after the 60s TTL.
     expireAuthStatusCache()
     clearStaleProfileHealth(result.profileId)
+    refreshClaudeFactsAfterLogin(result.profileId, result.claudeConfigDir)
     claudeLog("profile.add_completed", {
       profile: result.profileId,
       userAgent: c.req.header("user-agent")?.slice(0, 120) ?? null,

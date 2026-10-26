@@ -14,7 +14,10 @@ Own the operator's **Claude accounts** and decide which one serves a request:
   login, token refresh/health, plan and usage facts, and the cross-process
   profile config store (`profile*.ts`, `auth*.ts`, `tokenHealth.ts`,
   `tokenRefresh.ts`, `oauth*.ts`,
-  `planAllowance.ts`, `credentialsMode.ts`);
+  `planAllowance.ts`, `credentialsMode.ts`), the account each profile is
+  signed in to (`organizationName.ts`), profiles signed in to one account
+  (`duplicateProfiles.ts`) and the post-sign-in re-read state
+  (`profileFactsRefresh.ts`);
 - routing modes (`routing.ts`): `active` (default), `sticky` (rendezvous
   hashing), `priority` (fail-over pool) and `active+priority`, plus
   follow-another-instance mode (`followActive.ts`);
@@ -73,6 +76,36 @@ User-facing behavior: `docs/profiles.md`. Throttling and `[1m]` bench scope:
   default. An OAuth-usage refinement may only *extend* a cooldown, runs only at
   full utilization, is not awaited, and is skipped for non-`claude-max` and
   billing refusals.
+- **Account identity is Meridian's own record, re-read per credential.**
+  `GET /api/oauth/profile` supplies the organization name, account and
+  organization UUIDs and email; they are kept in `organizations.json` beside
+  settings (never in a credential file, which Claude Code owns and rewrites),
+  keyed by profile, with the stored access token's expiry they were read for.
+  The page path only reads the file; a record is refreshed in the background
+  when it is a day old or when the stored token changes (login, re-login,
+  renewal), and a finished Meridian sign-in reads it at once. The file is
+  replaced atomically (temporary file + rename, owner-only).
+- **Only a record read for the current token is trusted.** The shown email
+  comes from that account read in preference to `claude auth status`, whose
+  cached email still names the previous account after a Meridian sign-in; a
+  record read for an earlier (or unreadable) token falls back to
+  `claude auth status` and contributes nothing to duplicate detection, so a
+  profile re-logged into another account with `claude login` is never flagged
+  from its previous account's record.
+- **Duplicate detection is informational only.** `duplicateOf` /
+  `duplicateBasis` on `/profiles/list` name profiles holding one account: a
+  Claude account is account UUID **and** organization UUID (email **and**
+  organization name only while the UUIDs are unknown); a ChatGPT seat is its
+  seat id, or the same email in the same workspace; email alone never matches,
+  and providers never match each other. Nothing is removed, renamed or
+  excluded, and routing, cooldowns and failover treat every profile as its own
+  account. Cooling down detected twins on a quota refusal was split out of
+  #1446 to be proposed separately.
+- **A finished sign-in reports its re-read.** Every completed sign-in marks the
+  profile `factsRefresh: updating` before the route answers, re-reads account,
+  usage and auth status, then clears it or reports `failed` with the reason for
+  five minutes; a newer sign-in supersedes an older run, and rename/removal
+  forgets it.
 - **Sticky routing is stateless** (rendezvous hashing): stickiness survives
   restarts without a persisted map, and adding a profile moves only the
   sessions that hash to it.

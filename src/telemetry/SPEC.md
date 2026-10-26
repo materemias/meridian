@@ -42,6 +42,24 @@ Record what Meridian did and show it to the operator:
 - Cost figures are **estimates**, never an invoice or remaining-budget claim;
   unpriced models are excluded and labeled, never shown as zero.
 
+## Decisions
+
+- **`/` and `/profiles` update in place.** Their polls patch `#content` from
+  the fresh markup (`domPatch.ts`) instead of replacing it: nodes are matched
+  by `data-key`/`id` (cards by profile id) or by position among unkeyed
+  siblings of one tag, and only changed attributes, text and added, moved or
+  removed nodes are touched, so find-in-page, a selection, focus and scroll
+  survive a refresh. A node marked `data-patch-own` (an open sign-in panel)
+  keeps its script-owned children.
+- **Card status is shared between both pages** (`profileCardStatus.ts`): the
+  informational duplicate badge and the post-sign-in *updating* / *failed*
+  line. The page remembers a sign-in it finished, so an answer requested
+  before it cannot clear the updating state; `/profiles` polls every 1.5s
+  while a card updates, drops an answer older than one already drawn, and
+  exempts an updating card from the search (not from the provider chips). An
+  updating card dims only its figures; its name row and active border never
+  dim.
+
 User-facing behavior is documented in `MONITORING.md`.
 
 ## Known limitations
