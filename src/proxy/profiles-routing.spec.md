@@ -76,6 +76,57 @@ User-facing behavior: `docs/profiles.md`. Throttling and `[1m]` bench scope:
 - **Sticky routing is stateless** (rendezvous hashing): stickiness survives
   restarts without a persisted map, and adding a profile moves only the
   sessions that hash to it.
+- **Banked resets are explicit-only** (owner-approved 2026-10-26, #1429).
+  `GET /v1/usage/quota/all` lists each Claude profile's grants; only
+  `POST /v1/usage/quota/reset` with an explicit `profile`, `grantId` and
+  `requestId` redeems one. Meridian never redeems automatically (not on a
+  refusal, failover, cooldown or poll) and never retries the mutation: a reset
+  spends a scarce grant, and Anthropic does not promise to deduplicate it.
+- **One redemption per profile, remembered per request ID.** While a
+  redemption is in flight for a profile, any other for that profile gets 409
+  `reset_in_progress` with no upstream call. Once the mutation POST has been
+  dispatched, its outcome — confirmed, rejected *or uncertain* — is remembered
+  in memory by (profile, requestId), bounded (256 entries, oldest evicted) and
+  for 15 minutes. A repeat with the same requestId and grantId replays that
+  response with `replayed: true` and sends nothing; the same requestId with a
+  different grantId is 409 `request_id_conflict`. Uncertain outcomes are
+  reported as `indeterminate: true`, never as success or failure, and replaying
+  them is the point: a blind client retry after a lost response must not spend
+  a second grant. Failures before dispatch (no token, unreadable organization)
+  are not remembered, since nothing was sent. A restart forgets the ledger.
+- **A confirmed reset is an explicit exception to "refinement may only extend
+  a cooldown" and "a profile switch clears nothing".** Only a fresh (not
+  replayed) `result: "reset"` may clear local state, and only the SDK buckets
+  the provider lists in `cleared`, plus spent/exhaustion marks for that same
+  profile whose reported bucket was cleared and that are quota refusals within
+  the expected window. Uncleared weekly/model buckets, independent overage
+  state, unknown-bucket and non-quota refusals, and other profiles are
+  untouched; `already_used`, other results and uncertain outcomes clear
+  nothing.
+- **Usage reads resolve the profile type first.** `/v1/usage/quota`,
+  `/v1/usage/quota/all`, cooldown refinement and redemption run
+  `resolveProfile` before touching credentials, so a profile whose type is
+  inferred from `oauthToken` (or mislabelled `claude-max` with a token) reports
+  type `oauth-token` / `not_oauth` instead of reading the host's on-disk OAuth
+  account under its id, and `/v1/usage/quota` returns `oauth: null` for any
+  non-`claude-max` target.
+- **OAuth usage request identity.** Usage, identity and reset requests send
+  `User-Agent: claude-cli/<version> (external, cli)`, where `<version>` is the
+  `@anthropic-ai/claude-code` package installed with Meridian
+  (`bundledClaudeCodeVersion`), because Anthropic gates banked-reset
+  eligibility by client version (`ineligible_reason: "cli_version"`) and the
+  identity should match the client Meridian actually ships. Only when that
+  package cannot be read does it fall back to a pinned `2.1.304`, the client
+  the cedar_ember contract was read from; bump it with that contract. The usage
+  GET adds only `?cedar_ember=1` (not Claude Code's `skip_spend=1`, which would
+  drop `extra_usage`); it is on every usage read because all reads share one
+  per-profile snapshot cache, and it only adds the `cedar_ember` block —
+  windows and `extraUsage` parse identically with or without it. The identity
+  and reset requests carry no query flags.
+- **Grant-selection fields are passed through, not computed.** `bankedResets`
+  exposes the provider's `nextGrantId` (null unless it names a listed grant)
+  and `ineligibleReason`, and per grant `startsAt`, `paused` and `usableNow`;
+  malformed values become `null`. Meridian never picks a grant itself.
 
 ## Known limitations
 

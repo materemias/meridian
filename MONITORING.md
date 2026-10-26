@@ -29,11 +29,16 @@ Claude profiles in `/v1/usage/quota/all` also include `bankedResets`:
 {
   "bankedResets": {
     "eligible": true,
+    "ineligibleReason": null,
+    "nextGrantId": "example-reset-grant",
     "grants": [
       {
         "id": "example-reset-grant",
         "resetsLeft": 1,
-        "expiresAt": 1792684800000
+        "expiresAt": 1792684800000,
+        "startsAt": null,
+        "paused": false,
+        "usableNow": true
       }
     ]
   }
@@ -43,6 +48,12 @@ Claude profiles in `/v1/usage/quota/all` also include `bankedResets`:
 Each grant keeps its own remaining reset count and expiration date.
 `expiresAt` is Unix epoch milliseconds, or `null` when the date is unknown.
 `id` is the provider's grant identifier, or `null` when unavailable.
+`startsAt` (epoch milliseconds), `paused` and `usableNow` are the provider's
+own per-grant flags; `nextGrantId` is the grant the provider would redeem next
+(only when it names a listed grant) and `ineligibleReason` is the provider's
+reason the account is not eligible (for example `cli_version`). Each is `null`
+when absent or unreadable. Meridian passes these through and never chooses a
+grant for you.
 The list preserves provider inventory, including exhausted, paused,
 not-yet-started and expired grants. It is not a count of resets usable now,
 and `eligible` does not establish that a particular grant can be used.
@@ -105,9 +116,24 @@ Meridian sends one redemption POST and does not retry it automatically.
 Transport failures or invalid responses after dispatch can return
 `indeterminate: true`: the reset may have been consumed even though the response
 was lost. Re-read quota and confirm the outcome before another intentional
-attempt. Keep the original request ID if reconciling that operation; do not
-generate a new one as an automatic retry. Claude's client reuses IDs after
-uncertain outcomes, but this is not a guarantee of server-side deduplication.
+attempt.
+
+Only one redemption per profile runs at a time: another request for that
+profile while one is in flight returns HTTP 409 `reset_in_progress` and sends
+nothing upstream. Once Meridian has sent the mutation, it remembers the outcome
+for that profile and `requestId` for 15 minutes (up to 256 outcomes, oldest
+dropped first; a restart forgets them). Repeating the same `requestId` with the
+same `grantId` returns the remembered response again, with the same status and
+`replayed: true`, without contacting Claude — this includes uncertain outcomes,
+so a blind retry cannot spend a second grant. Repeating a `requestId` with a
+different `grantId` returns HTTP 409 `request_id_conflict`. Fresh responses carry
+`replayed: false`. Failures before the mutation was sent (`no_token`,
+`no_organization`, an unreadable organization) are not remembered. To make a new
+intentional attempt, use a new `requestId`. Claude's client reuses IDs after
+uncertain outcomes, but server-side deduplication is not guaranteed.
+
+Every Claude OAuth usage, identity and reset request identifies itself as the
+Claude Code version installed with Meridian.
 
 
 ## Reading Token and Cache Metrics
