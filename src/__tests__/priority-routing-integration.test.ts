@@ -2780,6 +2780,7 @@ describe("re-authenticated profile unbenching (#1385)", () => {
         }
         if (url.endsWith("/reset_rate_limits") && resetOutcome !== undefined) {
           resetRequests.push({ url, authorization: new Headers(init?.headers).get("Authorization") })
+          if (typeof resetOutcome === "function") return resetOutcome()
           return Response.json(resetOutcome, { status: resetStatus })
         }
         throw new Error(`Unexpected fetch in #1385 test: ${url}`)
@@ -2885,12 +2886,56 @@ describe("re-authenticated profile unbenching (#1385)", () => {
     }))
   }
 
-  async function resetQuota(app: TestApp, profile = "work"): Promise<Response> {
+  async function resetQuota(app: TestApp, profile = "work", ids: { grantId?: string; requestId?: string } = {}): Promise<Response> {
     return app.fetch(new Request("http://localhost/v1/usage/quota/reset", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ profile, grantId: "fake-grant", requestId: "fake-request" }),
+      body: JSON.stringify({ profile, grantId: ids.grantId ?? "fake-grant", requestId: ids.requestId ?? "fake-request" }),
     }))
   }
+
+  it("answers a concurrent redemption with reset_in_progress and replays a settled request ID", async () => {
+    const { app, workDir } = createReauthTestApp()
+    await seedResetCredentials(workDir)
+    const release = Promise.withResolvers<Response>()
+    const posted = Promise.withResolvers<void>()
+    stubOAuthEndpoints(200, () => {
+      posted.resolve()
+      return release.promise
+    })
+    const first = resetQuota(app)
+    await posted.promise
+    const concurrent = await resetQuota(app, "work", { requestId: "fake-other-request" })
+    expect(concurrent.status).toBe(409)
+    expect(concurrent.headers.get("cache-control")).toBe("no-store")
+    expect(await concurrent.json()).toEqual({ code: "reset_in_progress", error: expect.any(String), indeterminate: false })
+    release.resolve(Response.json({ result: "reset", resets_left: 0, cleared: ["five_hour"] }))
+    const settled = await first
+    expect(settled.status).toBe(200)
+    const settledBody = await settled.json() as Record<string, unknown>
+    expect(settledBody).toMatchObject({ profile: "work", grantId: "fake-grant", requestId: "fake-request", result: "reset", replayed: false })
+    rateLimitStore.record("work", { status: "rejected", rateLimitType: "five_hour", utilization: 1, resetsAt: Date.now() + 3_600_000 })
+    const replay = await resetQuota(app)
+    expect(replay.status).toBe(200)
+    expect(await replay.json()).toEqual({ ...settledBody, replayed: true })
+    expect(rateLimitStore.get("work", "five_hour")?.status).toBe("rejected")
+    const conflict = await resetQuota(app, "work", { grantId: "fake-other-grant" })
+    expect(conflict.status).toBe(409)
+    expect(await conflict.json()).toMatchObject({ code: "request_id_conflict", indeterminate: false })
+    expect(resetRequests).toHaveLength(1)
+  })
+
+  it("replays an indeterminate outcome instead of re-sending a blind retry", async () => {
+    const { app, workDir } = createReauthTestApp()
+    await seedResetCredentials(workDir)
+    stubOAuthEndpoints(200, () => { throw new Error("Synthetic connection loss") })
+    const first = await resetQuota(app)
+    expect(first.status).toBe(502)
+    expect(await first.json()).toEqual({ code: "reset_indeterminate", error: expect.any(String), indeterminate: true, replayed: false })
+    const retry = await resetQuota(app)
+    expect(retry.status).toBe(502)
+    expect(await retry.json()).toEqual({ code: "reset_indeterminate", error: expect.any(String), indeterminate: true, replayed: true })
+    expect(resetRequests).toHaveLength(1)
+  })
 
   it("rejects inferred token reset targets without consulting any credential store", async () => {
     const { app } = createProxyServer({

@@ -544,6 +544,8 @@ type OAuthResetFailure = {
   code: OAuthResetFailureCode
   message: string
   indeterminate: boolean
+  /** The mutation POST was handed to fetch; its outcome is then tied to the request ID. */
+  dispatched: boolean
 }
 
 export type OAuthResetResult = OAuthResetFailure | {
@@ -564,7 +566,11 @@ function invalidateResetUsage(profileId?: string | null): void {
 }
 
 function fail(status: OAuthResetFailure["status"], code: OAuthResetFailureCode, message: string, indeterminate = false): OAuthResetFailure {
-  return { ok: false, status, code, message, indeterminate }
+  return { ok: false, status, code, message, indeterminate, dispatched: false }
+}
+
+function afterDispatch(failure: OAuthResetFailure): OAuthResetFailure {
+  return { ...failure, dispatched: true }
 }
 
 function httpFailure(status: number): OAuthResetFailure {
@@ -613,21 +619,21 @@ export async function redeemOAuthQuotaReset(
     if (!response.ok) {
       if (response.status >= 500) {
         invalidateResetUsage(opts?.profileId)
-        return fail(502, "reset_indeterminate", "Reset outcome is unknown; do not automatically retry", true)
+        return afterDispatch(fail(502, "reset_indeterminate", "Reset outcome is unknown; do not automatically retry", true))
       }
-      return httpFailure(response.status)
+      return afterDispatch(httpFailure(response.status))
     }
     let body: unknown
     try {
       body = await response.json()
     } catch {
       invalidateResetUsage(opts?.profileId)
-      return fail(502, "invalid_response", "Reset response was invalid; outcome is unknown", true)
+      return afterDispatch(fail(502, "invalid_response", "Reset response was invalid; outcome is unknown", true))
     }
     const result = quotaResetOutcome.safeParse(body)
     if (!result.success) {
       invalidateResetUsage(opts?.profileId)
-      return fail(502, "invalid_response", "Reset response was invalid; outcome is unknown", true)
+      return afterDispatch(fail(502, "invalid_response", "Reset response was invalid; outcome is unknown", true))
     }
     const value = result.data
     if (value.result === "reset" || value.result === "already_used") invalidateResetUsage(opts?.profileId)
@@ -641,7 +647,67 @@ export async function redeemOAuthQuotaReset(
     } }
   } catch {
     invalidateResetUsage(opts?.profileId)
-    return fail(502, "reset_indeterminate", "Reset outcome is unknown; do not automatically retry", true)
+    return afterDispatch(fail(502, "reset_indeterminate", "Reset outcome is unknown; do not automatically retry", true))
+  }
+}
+
+const RESET_LEDGER_MAX_ENTRIES = 256
+const RESET_LEDGER_TTL_MS = 15 * 60_000
+/** Redemption currently running per ledger scope (profile). */
+const resetInflightByScope = new Map<string, { requestId: string; grantId: string }>()
+/** Settled, dispatched outcomes keyed by scope + request ID, oldest first. */
+const resetLedger = new Map<string, { grantId: string; result: OAuthResetResult; settledAt: number }>()
+
+function resetLedgerKey(scope: string, requestId: string): string {
+  return `${scope}\u0000${requestId}`
+}
+
+function pruneResetLedger(now: number): void {
+  for (const [key, entry] of resetLedger) {
+    if (now - entry.settledAt < RESET_LEDGER_TTL_MS && resetLedger.size <= RESET_LEDGER_MAX_ENTRIES) break
+    resetLedger.delete(key)
+  }
+}
+
+export type OAuthResetAttempt =
+  | { kind: "settled"; result: OAuthResetResult; replayed: boolean }
+  | { kind: "in_progress" }
+  | { kind: "request_id_conflict" }
+
+/**
+ * The route's entry point: at most one redemption per profile at a time, and a
+ * request ID whose mutation was dispatched replays its remembered outcome
+ * instead of reaching Anthropic again. See profiles-routing.spec.md.
+ */
+export async function redeemOAuthQuotaResetOnce(
+  input: OAuthQuotaResetRequest,
+  opts?: Parameters<typeof redeemOAuthQuotaReset>[1],
+): Promise<OAuthResetAttempt> {
+  const scope = input.profile
+  const key = resetLedgerKey(scope, input.requestId)
+  pruneResetLedger(Date.now())
+  const settled = resetLedger.get(key)
+  if (settled) {
+    return settled.grantId === input.grantId
+      ? { kind: "settled", result: settled.result, replayed: true }
+      : { kind: "request_id_conflict" }
+  }
+  const running = resetInflightByScope.get(scope)
+  if (running) {
+    return running.requestId === input.requestId && running.grantId !== input.grantId
+      ? { kind: "request_id_conflict" }
+      : { kind: "in_progress" }
+  }
+  resetInflightByScope.set(scope, { requestId: input.requestId, grantId: input.grantId })
+  try {
+    const result = await redeemOAuthQuotaReset(input, opts)
+    if (result.ok || result.dispatched) {
+      resetLedger.set(key, { grantId: input.grantId, result, settledAt: Date.now() })
+      pruneResetLedger(Date.now())
+    }
+    return { kind: "settled", result, replayed: false }
+  } finally {
+    resetInflightByScope.delete(scope)
   }
 }
 
@@ -880,4 +946,6 @@ export function resetOAuthUsageCache(): void {
   failureByProfile.clear()
   rateLimitRunByProfile.clear()
   lastRateLimitRefreshAtByProfile.clear()
+  resetInflightByScope.clear()
+  resetLedger.clear()
 }

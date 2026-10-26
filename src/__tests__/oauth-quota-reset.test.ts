@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test"
-import { clearOAuthUsageForProfile, fetchOAuthUsage, fetchOAuthUsageResult, peekOAuthUsage, redeemOAuthQuotaReset, resetOAuthUsageCache } from "../proxy/oauthUsage"
+import { afterEach, describe, expect, setSystemTime, test } from "bun:test"
+import { clearOAuthUsageForProfile, fetchOAuthUsage, fetchOAuthUsageResult, oauthUserAgent, peekOAuthUsage, redeemOAuthQuotaReset, redeemOAuthQuotaResetOnce, resetOAuthUsageCache } from "../proxy/oauthUsage"
 import type { CredentialStore } from "../proxy/tokenRefresh"
 
 const input = { profile: "work", grantId: "grant_1", requestId: "Request-1" }
@@ -9,7 +9,10 @@ const store: CredentialStore = {
   async write() { throw new Error("Unexpected credential write") },
 }
 const options = { store, profileId: "work", refreshImpl: async () => { throw new Error("Unexpected refresh") } }
-afterEach(resetOAuthUsageCache)
+afterEach(() => {
+  resetOAuthUsageCache()
+  setSystemTime()
+})
 
 describe("explicit OAuth quota redemption", () => {
   test("normalizes a confirmed reset outcome", async () => {
@@ -235,5 +238,185 @@ describe("explicit OAuth quota redemption", () => {
     expect(result.lastGood).toBe(result.snapshot)
     expect(result.snapshot).not.toBeNull()
     expect(peekOAuthUsage("work")).toBe(result.snapshot ?? undefined)
+  })
+})
+
+describe("the exact redemption request", () => {
+  test("posts the explicit grant and request IDs to the token's organization, once", async () => {
+    const requests: Array<{ url: string; method: string; headers: Headers; body: unknown }> = []
+    const result = await redeemOAuthQuotaReset(input, { ...options, fetchImpl: async (url, init) => {
+      requests.push({
+        url, method: init?.method ?? "GET", headers: new Headers(init?.headers),
+        body: typeof init?.body === "string" ? JSON.parse(init.body) : init?.body ?? null,
+      })
+      return Response.json(init?.method === "POST" ? { result: "reset", cleared: ["five_hour"] } : { organization: { uuid: org } })
+    } })
+    expect(result.ok).toBe(true)
+    expect(requests.map(({ url, method, body }) => ({ url, method, body }))).toEqual([
+      { url: "https://api.anthropic.com/api/oauth/profile", method: "GET", body: null },
+      {
+        url: `https://api.anthropic.com/api/organizations/${org}/reset_rate_limits`,
+        method: "POST",
+        body: { program: "cedar_ember", grant_id: "grant_1", request_id: "Request-1" },
+      },
+    ])
+    for (const request of requests) {
+      expect(request.headers.get("authorization")).toBe("Bearer fake-selected-token")
+      expect(request.headers.get("user-agent")).toBe(oauthUserAgent())
+      expect(request.url).not.toContain("cedar_ember=1")
+    }
+    expect(requests[1]?.headers.get("content-type")).toBe("application/json")
+  })
+})
+
+describe("single-flight and request-ID replay", () => {
+  function countingUpstream(outcome: () => Response | Promise<Response>) {
+    const counts = { identity: 0, posts: 0 }
+    const fetchImpl = async (_url: string, init?: RequestInit) => {
+      if (init?.method !== "POST") {
+        counts.identity++
+        return Response.json({ organization: { uuid: org } })
+      }
+      counts.posts++
+      return outcome()
+    }
+    return { counts, fetchImpl }
+  }
+
+  test("a second redemption for the same profile while one is in flight sends nothing", async () => {
+    const release = Promise.withResolvers<Response>()
+    const posted = Promise.withResolvers<void>()
+    const { counts, fetchImpl } = countingUpstream(() => {
+      posted.resolve()
+      return release.promise
+    })
+    const first = redeemOAuthQuotaResetOnce(input, { ...options, fetchImpl })
+    await posted.promise
+    for (const other of [{ ...input, requestId: "Request-2" }, { ...input, grantId: "grant_2", requestId: "Request-2" }, input]) {
+      expect(await redeemOAuthQuotaResetOnce(other, { ...options, fetchImpl })).toEqual({ kind: "in_progress" })
+    }
+    expect(await redeemOAuthQuotaResetOnce({ ...input, grantId: "grant_2" }, { ...options, fetchImpl })).toEqual({ kind: "request_id_conflict" })
+    release.resolve(Response.json({ result: "reset", cleared: ["five_hour"] }))
+    expect(await first).toMatchObject({ kind: "settled", replayed: false, result: { ok: true } })
+    expect(counts).toEqual({ identity: 1, posts: 1 })
+  })
+
+  test("other profiles are not blocked by an in-flight redemption", async () => {
+    const release = Promise.withResolvers<Response>()
+    const posted = Promise.withResolvers<void>()
+    let posts = 0
+    const fetchImpl = async (_url: string, init?: RequestInit) => {
+      if (init?.method !== "POST") return Response.json({ organization: { uuid: org } })
+      posts++
+      if (posts === 1) {
+        posted.resolve()
+        return release.promise
+      }
+      return Response.json({ result: "not_limited" })
+    }
+    const first = redeemOAuthQuotaResetOnce(input, { ...options, fetchImpl })
+    await posted.promise
+    const other = await redeemOAuthQuotaResetOnce({ ...input, profile: "personal" }, { ...options, profileId: "personal", fetchImpl })
+    expect(other).toMatchObject({ kind: "settled", replayed: false, result: { ok: true, outcome: { result: "not_limited" } } })
+    release.resolve(Response.json({ result: "reset" }))
+    await first
+    expect(posts).toBe(2)
+  })
+
+  test("a repeated request ID with the same grant replays the settled outcome without an upstream call", async () => {
+    const { counts, fetchImpl } = countingUpstream(() => Response.json({ result: "reset", resets_left: 0, cleared: ["five_hour"] }))
+    const first = await redeemOAuthQuotaResetOnce(input, { ...options, fetchImpl })
+    if (first.kind !== "settled") throw new Error("Expected a settled first redemption")
+    expect(first.replayed).toBe(false)
+    const again = await redeemOAuthQuotaResetOnce(input, { ...options, fetchImpl })
+    expect(again).toEqual({ kind: "settled", replayed: true, result: first.result })
+    expect(counts).toEqual({ identity: 1, posts: 1 })
+  })
+
+  test("a repeated request ID with a different grant is a conflict and sends nothing", async () => {
+    const { counts, fetchImpl } = countingUpstream(() => Response.json({ result: "not_limited" }))
+    await redeemOAuthQuotaResetOnce(input, { ...options, fetchImpl })
+    expect(await redeemOAuthQuotaResetOnce({ ...input, grantId: "grant_2" }, { ...options, fetchImpl })).toEqual({ kind: "request_id_conflict" })
+    expect(counts).toEqual({ identity: 1, posts: 1 })
+  })
+
+  test("request IDs are remembered per profile", async () => {
+    const { counts, fetchImpl } = countingUpstream(() => Response.json({ result: "not_limited" }))
+    await redeemOAuthQuotaResetOnce(input, { ...options, fetchImpl })
+    const other = await redeemOAuthQuotaResetOnce({ ...input, profile: "personal", grantId: "grant_2" }, { ...options, profileId: "personal", fetchImpl })
+    expect(other).toMatchObject({ kind: "settled", replayed: false })
+    expect(counts.posts).toBe(2)
+  })
+
+  test("indeterminate outcomes are remembered so a blind retry does not re-send", async () => {
+    for (const outcome of [
+      () => { throw new Error("Synthetic connection loss") },
+      () => new Response("unavailable", { status: 503 }),
+      () => new Response("not json"),
+      () => Response.json({ result: "future" }),
+    ]) {
+      resetOAuthUsageCache()
+      const { counts, fetchImpl } = countingUpstream(outcome)
+      const first = await redeemOAuthQuotaResetOnce(input, { ...options, fetchImpl })
+      expect(first).toMatchObject({ kind: "settled", replayed: false, result: { ok: false, indeterminate: true, dispatched: true } })
+      const retry = await redeemOAuthQuotaResetOnce(input, { ...options, fetchImpl })
+      expect(retry).toMatchObject({ kind: "settled", replayed: true, result: { ok: false, indeterminate: true } })
+      expect(retry.kind === "settled" && first.kind === "settled" && retry.result === first.result).toBe(true)
+      expect(counts.posts).toBe(1)
+    }
+  })
+
+  test("definite post-dispatch rejections are replayed too", async () => {
+    const { counts, fetchImpl } = countingUpstream(() => new Response(null, { status: 429 }))
+    expect(await redeemOAuthQuotaResetOnce(input, { ...options, fetchImpl })).toMatchObject({ replayed: false, result: { code: "rate_limited", indeterminate: false } })
+    expect(await redeemOAuthQuotaResetOnce(input, { ...options, fetchImpl })).toMatchObject({ replayed: true, result: { code: "rate_limited" } })
+    expect(counts.posts).toBe(1)
+  })
+
+  test("failures before the mutation is sent are not remembered", async () => {
+    let identityOk = false
+    let posts = 0
+    const fetchImpl = async (_url: string, init?: RequestInit) => {
+      if (init?.method !== "POST") return identityOk ? Response.json({ organization: { uuid: org } }) : new Response(null, { status: 503 })
+      posts++
+      return Response.json({ result: "reset" })
+    }
+    expect(await redeemOAuthQuotaResetOnce(input, { ...options, fetchImpl })).toMatchObject({ replayed: false, result: { ok: false, code: "upstream_error", dispatched: false } })
+    identityOk = true
+    expect(await redeemOAuthQuotaResetOnce(input, { ...options, fetchImpl })).toMatchObject({ replayed: false, result: { ok: true } })
+    expect(posts).toBe(1)
+  })
+
+  test("the in-flight claim is released after a thrown credential read", async () => {
+    const throwing: CredentialStore = { async read() { throw new Error("Synthetic keychain failure") }, async write() { return false } }
+    expect(await redeemOAuthQuotaResetOnce(input, { ...options, store: throwing, fetchImpl: async () => Response.json({}) }))
+      .toMatchObject({ kind: "settled", result: { code: "no_token" } })
+    const { counts, fetchImpl } = countingUpstream(() => Response.json({ result: "not_limited" }))
+    expect(await redeemOAuthQuotaResetOnce({ ...input, requestId: "Request-2" }, { ...options, fetchImpl })).toMatchObject({ kind: "settled", replayed: false })
+    expect(counts.posts).toBe(1)
+  })
+
+  test("remembered outcomes expire after fifteen minutes", async () => {
+    const start = Date.now()
+    setSystemTime(new Date(start))
+    const { counts, fetchImpl } = countingUpstream(() => Response.json({ result: "not_limited" }))
+    await redeemOAuthQuotaResetOnce(input, { ...options, fetchImpl })
+    setSystemTime(new Date(start + 15 * 60_000 - 1))
+    expect(await redeemOAuthQuotaResetOnce(input, { ...options, fetchImpl })).toMatchObject({ replayed: true })
+    setSystemTime(new Date(start + 15 * 60_000))
+    expect(await redeemOAuthQuotaResetOnce(input, { ...options, fetchImpl })).toMatchObject({ replayed: false })
+    expect(counts.posts).toBe(2)
+  })
+
+  test("the ledger keeps at most 256 outcomes, evicting the oldest", async () => {
+    const { counts, fetchImpl } = countingUpstream(() => Response.json({ result: "not_limited" }))
+    for (let i = 0; i <= 256; i++) {
+      await redeemOAuthQuotaResetOnce({ ...input, requestId: `Request-${i}` }, { ...options, fetchImpl })
+    }
+    expect(counts.posts).toBe(257)
+    expect(await redeemOAuthQuotaResetOnce({ ...input, requestId: "Request-256" }, { ...options, fetchImpl })).toMatchObject({ replayed: true })
+    expect(await redeemOAuthQuotaResetOnce({ ...input, requestId: "Request-1" }, { ...options, fetchImpl })).toMatchObject({ replayed: true })
+    expect(await redeemOAuthQuotaResetOnce({ ...input, requestId: "Request-0" }, { ...options, fetchImpl })).toMatchObject({ replayed: false })
+    expect(counts.posts).toBe(258)
   })
 })

@@ -46,7 +46,7 @@ import { AdmissionHold, parseDrainOptions, type AdmissionReservation } from "./a
 import { DrainBodyError, readDrainBody } from "./drainBody"
 import { isGenerationSubmission, onGenerationResponseSettled } from "./generationAdmission"
 import { closeServerWithGracePeriod, trackServerConnections, waitForShutdownIdle, withShutdownDeadline } from "./shutdown"
-import { fetchOAuthUsage, fetchOAuthUsageResult, toUsageEntry, peekOAuthUsage, clearOAuthUsageForProfile, quotaResetBody, redeemOAuthQuotaReset } from "./oauthUsage"
+import { fetchOAuthUsage, fetchOAuthUsageResult, toUsageEntry, peekOAuthUsage, clearOAuthUsageForProfile, quotaResetBody, redeemOAuthQuotaResetOnce } from "./oauthUsage"
 import { isSameOriginRequest } from "../sameOrigin"
 import { resolveSdkWorkingDirectory } from "./cwd"
 import type { Context } from "hono"
@@ -11316,16 +11316,23 @@ function createProxyServerWithAuthOwner(config: Partial<ProxyConfig>, authOwner:
     if (resolved && resolved.type !== "claude-max") {
       return c.json({ code: "not_oauth", error: "Profile does not use Claude OAuth" }, 400)
     }
-    const result = await redeemOAuthQuotaReset(body, {
+    const attempt = await redeemOAuthQuotaResetOnce(body, {
       profileId: singleAccount ? undefined : body.profile,
       claudeConfigDir: resolved?.env.CLAUDE_CONFIG_DIR,
       store: resolved ? credentialStoreForProfile(resolved) : undefined,
     })
-    if (!result.ok) {
-      return c.json({ code: result.code, error: result.message, indeterminate: result.indeterminate }, result.status)
+    if (attempt.kind === "in_progress") {
+      return c.json({ code: "reset_in_progress", error: "Another reset for this profile is still in progress", indeterminate: false }, 409)
     }
-    if (result.outcome.result === "reset") clearResetProfileHealth(body.profile, result.outcome.cleared)
-    return c.json({ ...body, ...result.outcome })
+    if (attempt.kind === "request_id_conflict") {
+      return c.json({ code: "request_id_conflict", error: "This requestId was already used with a different grantId", indeterminate: false }, 409)
+    }
+    const { result, replayed } = attempt
+    if (!result.ok) {
+      return c.json({ code: result.code, error: result.message, indeterminate: result.indeterminate, replayed }, result.status)
+    }
+    if (!replayed && result.outcome.result === "reset") clearResetProfileHealth(body.profile, result.outcome.cleared)
+    return c.json({ ...body, ...result.outcome, replayed })
   })
 
   // --- Subscription Quota ---
