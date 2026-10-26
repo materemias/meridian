@@ -95,14 +95,14 @@ function request(
 describe("native structured output", () => {
   let originalPassthrough: string | undefined
 
-  beforeEach(() => {
+  beforeEach(async () => {
     originalPassthrough = process.env.MERIDIAN_PASSTHROUGH
     process.env.MERIDIAN_PASSTHROUGH = "1"
     capturedOptions = {}
     mockMessages = []
     queryCalls = 0
     waitBeforeMessages = undefined
-    clearSessionCache()
+    await clearSessionCache()
     clearSharedSessions()
   })
 

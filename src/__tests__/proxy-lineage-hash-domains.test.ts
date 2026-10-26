@@ -40,7 +40,7 @@ const cases: { name: string; stored: Message[]; incoming: Message[]; expected: s
 ]
 
 describe("lineage hash integrity through HTTP", () => {
-  beforeEach(() => { captured = []; clearSessionCache() })
+  beforeEach(async () => { captured = []; await clearSessionCache() })
   for (const stream of [false, true]) {
     async function post(app: ReturnType<typeof createProxyServer>["app"], key: string, messages: Message[]) {
       const response = await app.fetch(new Request("http://localhost/v1/messages", {

@@ -123,11 +123,11 @@ function buildStaleSessionFixture() {
 // ============================================================
 
 describe("Session resume: session ID tracking", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     mockMessages = [
       assistantMessage([{ type: "text", text: "Hello" }]),
     ]
-    clearSessionCache()
+    await clearSessionCache()
     capturedQueryParams = null
     queryCallCount = 0
     firstCallerSelectedSessionId = undefined
@@ -280,11 +280,11 @@ describe("Session resume: session ID tracking", () => {
 // ============================================================
 
 describe("Session resume: fingerprint fallback", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     mockMessages = [
       assistantMessage([{ type: "text", text: "Hello" }]),
     ]
-    clearSessionCache()
+    await clearSessionCache()
     capturedQueryParams = null
     queryCallCount = 0
     firstCallerSelectedSessionId = undefined
@@ -383,11 +383,11 @@ describe("Session resume: fingerprint fallback", () => {
 // ============================================================
 
 describe("Session resume: only send last user message on resume", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     mockMessages = [
       assistantMessage([{ type: "text", text: "Hello" }]),
     ]
-    clearSessionCache()
+    await clearSessionCache()
     capturedQueryParams = null
     queryCallCount = 0
     firstCallerSelectedSessionId = undefined
@@ -485,9 +485,9 @@ describe("Session resume: only send last user message on resume", () => {
 })
 
 describe("Session resume: stale cross-node history", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     mockMessages = [assistantMessage([{ type: "text", text: "Recovered" }])]
-    clearSessionCache()
+    await clearSessionCache()
     capturedQueryParams = null
     queryCallCount = 0
     firstCallerSelectedSessionId = undefined

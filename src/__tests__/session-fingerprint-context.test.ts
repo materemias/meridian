@@ -139,12 +139,12 @@ async function postNoSession(
   }
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   mockMessages = [assistantMessage([{ type: "text", text: "ok" }])]
   capturedQueryParams = null
   queuedSessionLabels = []
   callerSelectedSessionIds = new Map()
-  clearSessionCache()
+  await clearSessionCache()
   clearSharedSessions()
 })
 

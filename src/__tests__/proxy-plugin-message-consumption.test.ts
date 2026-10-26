@@ -41,10 +41,10 @@ const { computeMessageHashes } = await import("../proxy/session/lineage")
 const { storeSession } = await import("../proxy/session/cache")
 const ownedDirectories: string[] = []
 
-beforeEach(() => {
+beforeEach(async () => {
   calls = []
   failures = []
-  clearSessionCache()
+  await clearSessionCache()
   clearSharedSessions()
   overrides = [
     spyOn(models, "getClaudeAuthStatusAsync").mockResolvedValue({ loggedIn: true, subscriptionType: "max" }),

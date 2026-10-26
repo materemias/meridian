@@ -59,11 +59,24 @@ test("Bun source worker reports failure without blocking timers", async () => {
 test("Node bundled worker resolves alongside the bundled observer", async () => {
   const directory = mkdtempSync(join(tmpdir(), "meridian-worker-bundle-"))
   try {
-    const bundled = await Bun.build({ entrypoints: [resolve(import.meta.dir, "../proxy/buildObserver.ts"), resolve(import.meta.dir, "../proxy/buildObservationWorker.ts")], outdir: directory, target: "node" })
-    expect(bundled.success).toBe(true)
+    // Match the production build's clean CLI process. In-process Bun.build
+    // shares bun:test's resolver state with unrelated imported test modules.
+    const bundled = spawnSync(process.execPath, ["build", resolve(import.meta.dir, "../proxy/buildObserver.ts"),
+      resolve(import.meta.dir, "../proxy/buildObservationWorker.ts"), `--outdir=${directory}`, "--target=node"], {
+      encoding: "utf8", timeout: 30000,
+    })
+    expect(bundled.error).toBeUndefined()
+    expect(bundled.status, bundled.stderr).toBe(0)
     writeFileSync(join(directory, "package.json"), '{"type":"module"}')
     writeFileSync(join(directory, "driver.mjs"), 'import {observeInWorker} from "./buildObserver.js"; const keepAlive=setInterval(()=>{},1000); try { const result=await observeInWorker("/missing-provenance-test","artifact"); if(result.state!=="invalid") process.exitCode=1; } finally { clearInterval(keepAlive) }')
     const result = spawnSync("node", [join(directory, "driver.mjs")], { encoding: "utf8", timeout: 10000 })
-    expect(result.status).toBe(0)
+    expect(result.error).toBeUndefined()
+    expect(result.status, result.stderr).toBe(0)
+    // A missing worker must fail this check, rather than looking like the
+    // expected invalid-artifact response from the actual running worker.
+    rmSync(join(directory, "buildObservationWorker.js"))
+    const missingWorker = spawnSync("node", [join(directory, "driver.mjs")], { encoding: "utf8", timeout: 10000 })
+    expect(missingWorker.error).toBeUndefined()
+    expect(missingWorker.status).not.toBe(0)
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })

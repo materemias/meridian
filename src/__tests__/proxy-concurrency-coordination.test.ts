@@ -316,7 +316,7 @@ describe("SDK and Session concurrency coordination", () => {
   const originalHold = process.env.MERIDIAN_SESSION_TURN_MAX_HOLD_MS
   const originalRouting = process.env.MERIDIAN_ROUTING
 
-  beforeEach(() => {
+  beforeEach(async () => {
     testSessionDir = mkdtempSync(join(tmpdir(), "meridian-concurrency-"))
     setSessionStoreDir(testSessionDir)
     process.env.MERIDIAN_MAX_CONCURRENT = "1"
@@ -327,7 +327,7 @@ describe("SDK and Session concurrency coordination", () => {
     capturedParams = []
     rateLimitWorkQueries = false
     loggedEvents = []
-    clearSessionCache()
+    await clearSessionCache()
     resetProcessSdkSemaphoreForTests()
     telemetryStore.clear()
   })

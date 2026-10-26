@@ -136,8 +136,8 @@ const priorMessages = [
 const continuation = [...priorMessages, { role: "user", content: "and now continue" }]
 
 describe("Resume refusal", () => {
-  beforeEach(() => {
-    clearSessionCache()
+  beforeEach(async () => {
+    await clearSessionCache()
     queryCalls = []
     queryCallCount = 0
     refuseAttempts = 1

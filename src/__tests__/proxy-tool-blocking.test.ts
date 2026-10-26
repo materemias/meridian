@@ -130,10 +130,10 @@ function assertAllToolsBlocked(params: any, label: string) {
   }
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   mockMessages = [assistantMessage([{ type: "text", text: "ok" }])]
   capturedQueryParams = null
-  clearSessionCache()
+  await clearSessionCache()
   clearSharedSessions()
 })
 
@@ -328,20 +328,20 @@ describe("Tool blocking: consistency across all paths", () => {
     results.push({ mode: "normal/non-stream", tools: [...params.options.disallowedTools].sort() })
 
     // Normal stream
-    clearSessionCache()
+    await clearSessionCache()
     app = createTestApp()
     params = await sendRequest(app, true)
     results.push({ mode: "normal/stream", tools: [...params.options.disallowedTools].sort() })
 
     // Passthrough non-stream
     process.env.CLAUDE_PROXY_PASSTHROUGH = "1"
-    clearSessionCache()
+    await clearSessionCache()
     app = createTestApp()
     params = await sendRequest(app, false)
     results.push({ mode: "passthrough/non-stream", tools: [...params.options.disallowedTools].sort() })
 
     // Passthrough stream
-    clearSessionCache()
+    await clearSessionCache()
     app = createTestApp()
     params = await sendRequest(app, true)
     results.push({ mode: "passthrough/stream", tools: [...params.options.disallowedTools].sort() })

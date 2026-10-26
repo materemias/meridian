@@ -83,13 +83,13 @@ let isolatedSessionDir = ""
 let clientDir = ""
 let savedAgent: string | undefined
 
-beforeEach(() => {
+beforeEach(async () => {
   isolatedSessionDir = mkdtempSync(join(tmpdir(), "meridian-http-test-"))
   setSessionStoreDir(isolatedSessionDir)
   clientDir = realpathSync(mkdtempSync(join(tmpdir(), "meridian-client-cwd-")))
   savedAgent = process.env.MERIDIAN_DEFAULT_AGENT
   delete process.env.MERIDIAN_DEFAULT_AGENT
-  clearSessionCache()
+  await clearSessionCache()
   queryCalls = []
   queryParams = []
   filedUnder = new Map([["sdk-original", PROXY_DIR]])

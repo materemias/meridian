@@ -105,10 +105,10 @@ function post(app: any, messages: any[], headers: Record<string, string> = {}, s
 describe("bounded fresh replay", () => {
   const envKeys = ["ANTHROPIC_DEFAULT_SONNET_MODEL", "MERIDIAN_DEFAULT_SONNET_MODEL", "MERIDIAN_REPLAY_BUDGET_TOKENS"]
   let savedEnv: Array<string | undefined> = []
-  beforeEach(() => {
+  beforeEach(async () => {
     savedEnv = envKeys.map(key => process.env[key])
     for (const key of envKeys) delete process.env[key]
-    clearSessionCache()
+    await clearSessionCache()
     capturedPrompts = []
     overflowFailures = 0
     overflowMessage = "Claude Code returned an error result: Prompt is too long"
@@ -297,8 +297,8 @@ describe("bounded fresh replay", () => {
 })
 
 describe("fresh-session replay envelope (#619)", () => {
-  beforeEach(() => {
-    clearSessionCache()
+  beforeEach(async () => {
+    await clearSessionCache()
     capturedPrompts = []
   })
 
@@ -375,8 +375,8 @@ describe("stateless client with a trailing injected block (#712)", () => {
   const INJECTED_ASSISTANT = { role: "assistant", content: "[post-history instructions]" }
   const PREFILL = { role: "user", content: "思考已结束。" }
 
-  beforeEach(() => {
-    clearSessionCache()
+  beforeEach(async () => {
+    await clearSessionCache()
     capturedPrompts = []
   })
 
@@ -428,8 +428,8 @@ describe("stateless client with a trailing injected block (#712)", () => {
  * to user content, which is why this went unnoticed.
  */
 describe("user-authored <thinking> survives (#720)", () => {
-  beforeEach(() => {
-    clearSessionCache()
+  beforeEach(async () => {
+    await clearSessionCache()
     capturedPrompts = []
   })
 
@@ -483,8 +483,8 @@ describe("user-authored <thinking> survives (#720)", () => {
 })
 
 describe("assistant content: Meridian's own markers stripped on replay (#724)", () => {
-  beforeEach(() => {
-    clearSessionCache()
+  beforeEach(async () => {
+    await clearSessionCache()
     capturedPrompts = []
   })
 
@@ -547,8 +547,8 @@ describe("MERIDIAN_STRIP_THINKING env escape hatch", () => {
   const priorMeridian = process.env.MERIDIAN_STRIP_THINKING
   const priorClaudeProxy = process.env.CLAUDE_PROXY_STRIP_THINKING
 
-  beforeEach(() => {
-    clearSessionCache()
+  beforeEach(async () => {
+    await clearSessionCache()
     capturedPrompts = []
   })
 

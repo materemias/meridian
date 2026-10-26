@@ -121,8 +121,8 @@ function post(app: any, body: any, headers: Record<string, string> = {}) {
 }
 
 describe("Stale UUID retry", () => {
-  beforeEach(() => {
-    clearSessionCache()
+  beforeEach(async () => {
+    await clearSessionCache()
     queryCalls = []
     queryParams = []
     queryCallCount = 0

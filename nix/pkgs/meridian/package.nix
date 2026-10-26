@@ -60,6 +60,8 @@ stdenvNoCC.mkDerivation (finalAttrs: {
 
     mkdir -p $out/lib/meridian
     cp -r dist plugin package.json $out/lib/meridian/
+    mkdir -p $out/lib/meridian/docs
+    cp docs/configuration.md $out/lib/meridian/docs/
     cp -R ${finalAttrs.passthru.node_modules}/runtime/node_modules $out/lib/meridian/
     chmod -R u+w $out/lib/meridian/node_modules
     node ${./prune-foreign-platforms.mjs} $out/lib/meridian/node_modules ${
@@ -72,6 +74,9 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     makeWrapper ${getExe nodejs_22} $out/bin/${finalAttrs.meta.mainProgram} \
       --add-flags "$out/lib/meridian/dist/cli.js" \
       --set-default MERIDIAN_CLAUDE_PATH ${getExe claudeCode}
+
+    makeWrapper ${getExe nodejs_22} $out/bin/meridian-bookkeeping \
+      --add-flags "$out/lib/meridian/dist/session-bookkeeping.js"
 
     runHook postInstall
   '';

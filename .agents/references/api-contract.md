@@ -1,3 +1,11 @@
+---
+id: api-contract
+type: architecture-design
+title: Stable public API and plugin contract
+status: active
+parent: architecture
+---
+
 # Plugin API boundaries
 
 ## Stable API Contract
@@ -8,15 +16,18 @@ External plugins depend on these interfaces. **Changes require project owner app
 |-----------|----------|---------|
 | `startProxyServer(config)` → `ProxyInstance` | `server.ts` | Plugins that spawn proxy instances |
 | `ProxyInstance.close()` | `types.ts` | Plugins for graceful shutdown |
+| `initializeProxyBookkeeping()` → opaque `ProxyBookkeepingHandle` with `close(): Promise<void>` | `session/bookkeeping/embedding.ts`, exported by `server.ts` | Owner-approved #1277 opt-in SQL embedding; JSON returns undefined, native SQL/path/readers stay private, successful close joins admitted durable work |
+| `clearSessionCache(): Promise<void>` | `session/cache.ts`, exported by `server.ts` | Owner-approved #1244/#1277 cleanup: reset memory immediately; await ordered durable cleanup, retaining its best-effort error policy |
 | `ProxyConfig` type | `types.ts` | Plugin configuration |
 | `x-opencode-session` header | `adapters/opencode.ts` | Session tracking from agent plugins |
+| Generic OpenAI `x-session-id` on `/v1/chat/completions` | `adapters/openai.ts`, `server.ts` | Owner-approved #1441: distinct conversation identity after the existing OpenCode/session-affinity keys and agent scoping; blank values keep the headerless path |
 | `x-meridian-profile` header | `server.ts`, `profiles.ts` | Per-request profile selection |
 | `GET /health` response shape | `server.ts` | Plugin health checks |
 | `/health` `backend` field | `server.ts` / `backends/antigravity.ts` | Desktop provider compatibility check (#1073) |
 | Antigravity `/v1/responses` and `/v1/responses/:id` | `backends/antigravityOpenai.ts`, `backends/antigravityResponses.ts` | OpenAI clients; bounded continuation/retrieval/deletion, optional durable state, background cancellation/event replay/input listing and input-token estimates (#1073) |
 | `/providers/status` and `/antigravity/*` | `server.ts` / `backends/` | Shared provider UI and Antigravity clients (#1073) |
 | `/health` `build` block | `buildInfo.ts` | Version/provenance drift detection |
-| `/health` optional `build.latest` / `build.updateAvailable`, authenticated `GET` / `PUT /settings/api/updates` | `server.ts`, `updateCheck.ts` | Explicit opt-in registry checks and shared settings UI (#1226) |
+| `/health` optional `build.latest` / `build.updateAvailable`, authenticated `GET` / `PUT /settings/api/updates` | `server.ts`, `updateCheck.ts`, `pluginUpdateCheck.ts` | Explicit opt-in registry checks and shared settings UI (#1226). Owner-approved 2026-10-26 (#1445): the response adds `plugins[]`, one entry per loaded plugin with `name`, `path`, `status`, `checkable`, `reason`, `package`, `installed`, `latest`, `updateAvailable`, `checkedAt`, `error` (optional fields absent when unknown); the list is present while the check is off, and the same `checkForUpdates` toggle governs sending plugin package names to the registry |
 | `/health` optional `hostname`, authenticated `GET` / `PUT /settings/api/header` | `headerSettings.ts`, `server.ts`, `backends/antigravity.ts` | Default-off `showHostname` setting naming the machine in the shared header; owner-approved in #1259 |
 | Authenticated `GET` / `PUT /settings/api/layout` | `server.ts`, `telemetry/pageLayout.ts` | Contained/wide page layout setting and shared settings UI |
 | Authenticated `GET` / `PUT /settings/api/claude-executable`; `/health` `claudeExecutable.source` value `custom` | `claudeExecutableSettings.ts`, `claudeExecutablePreference.ts`, `models.ts` | System/bundled/custom Claude Code executable choice, applied to the next turn; same-origin browser writes; `MERIDIAN_CLAUDE_PATH` still wins |
@@ -30,6 +41,14 @@ External plugins depend on these interfaces. **Changes require project owner app
 | `POST /profiles/active` request/response | `server.ts` | Profile switching from CLI and UI |
 | ChatGPT additions: OpenAI model ids on `/v1/responses` routed to ChatGPT seats; new `POST /v1/images/generations` and `/v1/images/edits` (ChatGPT only, 404 without it); `/health` `chatgpt` and `backends`; `/profiles/list` entries with `type: "chatgpt"`, `activeProfiles`, `chatgpt.owner`; `provider` on `POST /profiles/active`; `chatgpt` in `GET /inflight`; `/profiles/chatgpt/*`, `/settings/api/chatgpt` | `server.ts`, `upstream/`, `backends/chatgpt.ts`, `chatgpt/` | Additive and absent unless `MERIDIAN_CHATGPT_CREDENTIALS` (or a populated owned store) enables ChatGPT; existing fields keep their meaning: `activeProfile` stays the Claude pointer wherever Claude profiles exist |
 If you need to modify any of these, open an issue first — breaking changes affect downstream plugin authors.
+
+The owner approved the generic OpenAI conversation-header contract in #1441
+on 2026-10-21. `x-opencode-session` and `x-session-affinity` retain precedence
+over `x-session-id`, including their existing agent scoping. A nonblank
+`x-session-id` must be distinct per conversation and follows the same serialized,
+append-only history, fork and retry behavior as the other explicit keys.
+Other adapters retain their identity rules; request-body and CORS policy are
+unchanged. Actual affected-flow evidence and final-head checks remain required.
 
 The owner approved executable selection in #1319 on 2026-10-08. System remains
 the default; `MERIDIAN_CLAUDE_PATH` has highest priority. The authenticated
@@ -55,6 +74,14 @@ probes. Browser writes require the same origin, with a bounded HTTPS-origin
 bridge for an HTTP TLS-termination hop that preserves public Host/port
 (including explicit default 443). Foreign/opaque/malformed origins and
 different ports are rejected; forwarding headers confer no trust.
+
+The Pi extension (#1408, owner-approved) adds three client contracts: the
+`pi1` generation on the existing `x-meridian-opencode-turn` header, signed with
+the same `opencode-turn.key`/`MERIDIAN_OPENCODE_ATTESTATION_KEY` and accepted
+only by the Pi adapter (OpenCode rejects it, and Pi rejects OpenCode
+generations); `plugin.pi` (`"configured"`/`"not-configured"`) beside
+`plugin.opencode` in `/health`; and `MERIDIAN_SOURCE` in a child Pi process's
+environment, which the extension sends as `x-meridian-source`.
 
 Antigravity additionally accepts `statePath`, `plugins` and `pluginPaths` under its
 backend options. These are provider-specific and do not change Claude plugin

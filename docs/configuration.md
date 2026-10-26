@@ -36,14 +36,14 @@ Environment variables, endpoints, authentication, SDK feature toggles, passthrou
 | `MERIDIAN_DEFAULT_AGENT` | — | `opencode` | Default adapter for unrecognized agents: `opencode`, `forgecode`, `pi`, `prime`, `crush`, `droid`, `cherry`, `claude-code`, `passthrough`, `polytoken`, `openai`, `jcode`, `letta`, `codex`. Aliases: `prime-agent`, `cherrystudio`, `claudecode`. Re-read per request from the process environment — restart the proxy to pick up deployment-level env changes. |
 | `MERIDIAN_ROUTING` | — | `active` | Session-to-profile routing: `active` (all traffic to the active profile), `sticky` ([sticky session routing](profiles.md#sticky-session-routing)), or `priority` ([priority failover](profiles.md#priority-failover-routing)) |
 | `MERIDIAN_PROFILE_ORDER` | — | *(config order)* | Priority-mode pool order, comma-separated, highest priority first (e.g. `work,personal`). Also editable at `/settings`. |
-| `MERIDIAN_PRIORITY_FAILBACK` | — | `new-conversation` | Priority failback policy: `new-conversation` (current behavior) or `next-user-turn`. Environment value overrides `priorityFailback` in the settings JSON. Applies only to priority routing and OpenCode turn metadata; other adapters retain `new-conversation` behavior. |
+| `MERIDIAN_PRIORITY_FAILBACK` | — | `new-conversation` | Priority failback policy: `new-conversation` (current behavior) or `next-user-turn`. Environment value overrides `priorityFailback` in the settings JSON. Applies only to priority routing and the turn metadata signed by the OpenCode plugin and the Pi extension; other adapters retain `new-conversation` behavior. |
 | `MERIDIAN_FOLLOW_ACTIVE` | `CLAUDE_PROXY_FOLLOW_ACTIVE` | unset | Base URL of another Meridian instance to take the active profile from, e.g. `http://127.0.0.1:3456`. For a development instance running beside a primary one — see [Following another instance's active profile](#following-another-instances-active-profile). |
 | `MERIDIAN_PASSTHROUGH_EARLY_STOP` | — | `1` | Set to `0` to disable [digest-turn elimination](#how-tool-calling-works-in-passthrough) and restore the old end-of-turn behavior |
 | `MERIDIAN_PASSTHROUGH_MAX_TURNS` | `CLAUDE_PROXY_PASSTHROUGH_MAX_TURNS` | *(unset — capped at 1)* | Pin the passthrough SDK turn budget. An explicit positive value wins over the one-turn cap. With early stop enabled, a budget above one still stops after a batch forwarded to the client (see [digest-turn elimination](#how-tool-calling-works-in-passthrough)), so the pin adds headroom before the tool boundary; structured-output requests retain the normal SDK completion loop. Unset it unless you still need it. |
 | `MERIDIAN_PASSTHROUGH_UNCAPTURED_TOOL_RECOVERY` | — | *(unset — confirmed CLI rejection only)* | In streaming passthrough, complete tool calls can be returned as `tool_use` when every call has a CLI dispatch rejection matching its ID and tool name: `No such tool available`, or `InputValidationError: … could not be parsed as JSON`. Input must still form a complete JSON object after the supported control-character/invalid-escape repair; schema validation failures do not count. Explicit rejection can also qualify an undeclared tool name for the client's own invalid-tool response. The rejected SDK session is evicted so the next client result replays against a fresh one. Set to `1` to **also** allow experimental uncaptured abort-window recovery without explicit rejection (no live positive gate yet); every call must then name a declared tool. Set to `0` to disable both recoveries. Non-streaming responses are unaffected. Confirmed-rejection recovery applies at any turn budget, including deferred tools; abort-window recovery requires `maxTurns=1`. Both require a complete open envelope and no cancellation. When neither applies, the `sdk_termination` error log names the blocking condition as `uncaptured_veto=…`. |
 | `MERIDIAN_SESSION_GC_LOCK_WAIT_MS` | `CLAUDE_PROXY_SESSION_GC_LOCK_WAIT_MS` | `2000` | External lifecycle-lock acquisition budget, starting only at the head of the local FIFO; minimum 100 ms. Local queue waiting does not consume this budget and is not bounded by two seconds. Each lock allows 256 waiting callers; a holder stalled for 60 seconds rejects queued/new callers without unlocking its transaction, unless the deadline itself ran late because the event loop was blocked. An answered turn whose terminal publication meets any of these errors is still delivered; its next turn replays history. Request cancellation removes queued work or cancels acquisition, never an executing durable transaction; cleanup remains uncanceled. External timeout, queue capacity and stalled-holder failures answer **503 `overloaded_error`** with distinct reasons. |
 | `MERIDIAN_SESSION_PROFILE_COPY_PRUNE` | `CLAUDE_PROXY_SESSION_PROFILE_COPY_PRUNE` | `0` | Opt in to removing stale cross-profile session mappings during GC. Off preserves native resume history. Returning to a pruned profile uses flattened, context-trimmed replay, which cannot restore SDK thinking. |
-| `MERIDIAN_SESSION_PROFILE_COPY_GRACE_MS` | `CLAUDE_PROXY_SESSION_PROFILE_COPY_GRACE_MS` | `86400000` (24 hours) | With several profiles, the same conversation gets its own stored session under each profile it has run on. When profile-copy pruning is enabled, on every session GC sweep a copy is removed once a newer copy of that conversation exists under another profile and the older copy has not been used for this many milliseconds. The newest copy, copies of a conversation with a request in flight, and mappings a priority route depends on are always kept. A conversation that returns to a profile while its copy exists resumes that profile's own session; after removal it is replayed into a fresh session on that account, as flattened history trimmed to the model's context window. The default covers an account's 5-hour usage window resetting and a day of switching back and forth. `0` keeps only the newest copy. Removal is paced to leave at least half of `MERIDIAN_SESSION_GC_MAX_PENDING` free for new requests, so a large store is trimmed over several sweeps. |
+| `MERIDIAN_SESSION_PROFILE_COPY_GRACE_MS` | `CLAUDE_PROXY_SESSION_PROFILE_COPY_GRACE_MS` | `86400000` (24 hours) | With several profiles, the same conversation gets its own stored session under each profile it has run on. When profile-copy pruning is enabled, on every session GC sweep a copy is removed once a newer copy of that conversation exists under another profile and the older copy has not been used for this many milliseconds. The newest copy, copies of a conversation with a request in flight, and mappings a priority route depends on are always kept. A conversation that returns to a profile while its copy exists resumes that profile's own session, unless another profile's copy holds more of the history the client sends (the conversation took turns there since), in which case it is replayed as below; after removal it is replayed into a fresh session on that account, as flattened history trimmed to the model's context window. The default covers an account's 5-hour usage window resetting and a day of switching back and forth. `0` keeps only the newest copy. Removal is paced to leave at least half of `MERIDIAN_SESSION_GC_MAX_PENDING` free for new requests, so a large store is trimmed over several sweeps. |
 | `MERIDIAN_SILENT_TURN_RECOVERY` | `CLAUDE_PROXY_SILENT_TURN_RECOVERY` | `1` | Set to `0` to stop spending a recovery turn on a [silent turn](#silent-turns). Detection and telemetry stay on either way |
 | `MERIDIAN_UPSTREAM_IDLE_MS` | `CLAUDE_PROXY_UPSTREAM_IDLE_MS` | `90000` | Milliseconds the upstream stream may go quiet before the turn is treated as stalled. Raise it for long-thinking turns that were being killed mid-flight; `0` disables the guard entirely. Applies to the recovery turn too. |
 | `MERIDIAN_UPSTREAM_IDLE_MAX_CONSECUTIVE` | `CLAUDE_PROXY_UPSTREAM_IDLE_MAX_CONSECUTIVE` | `3` | Consecutive idle stalls for the same request and session before returning a terminal error. Identical retries are then rejected before another SDK query for one idle window (at least 60 seconds). A changed request or completed turn resets the streak; rejected retries do not extend the pause. `0` disables this ceiling. Tracking is bounded and local to the proxy instance; requests without a correlatable session are not pooled. |
@@ -69,6 +69,8 @@ Environment variables, endpoints, authentication, SDK feature toggles, passthrou
 | `MERIDIAN_NO_UPDATE_CHECK` | — | unset | Set to `1` to force the update check off even when the `checkForUpdates` setting is on. No outbound request is made at all when set. See [Build provenance](#build-provenance-and-staying-current). |
 | `MERIDIAN_UPDATE_CHECK_URL` | — | npm dist-tags | Registry endpoint for the update check. Point it at a mirror on restricted networks; it must return `{"latest":"<version>"}`. |
 | `MERIDIAN_UPDATE_CHECK_PATH` | — | `~/.cache/meridian/update-check.json` | Where the update check caches its result. |
+| `MERIDIAN_UPDATE_CHECK_REGISTRY` | — | `https://registry.npmjs.org` | Registry the plugin update check asks for each plugin package's `/-/package/<name>/dist-tags`. When `MERIDIAN_UPDATE_CHECK_URL` is set and this is not, plugins are not checked at all (rather than asking the public registry); set both to check plugins through your mirror. |
+| `MERIDIAN_PLUGIN_UPDATE_CHECK_PATH` | — | `~/.cache/meridian/plugin-update-check.json` | Where the plugin update check caches its results. |
 | `MERIDIAN_BUILD_SOURCE` | — | *(derived from the install path)* | Overrides the `build.source` reported by `/health`: `npm`, `local`, or `dev`. Normally set by [`bin/meridian-launchd.sh`](#running-as-a-service-without-drift), not by hand. |
 | `MERIDIAN_BUILD_SHA`, `MERIDIAN_BUILD_BRANCH`, `MERIDIAN_BUILD_DIRTY` | — | unset | Optional commit stamps surfaced in `/health` `build`. Absent unless something sets them at launch. |
 | `MERIDIAN_ERROR_REPORTING_DSN` | — | unset | GlitchTip/Sentry DSN to report Meridian's own crashes to; `errorReportingDsn` in `settings.json` is the alternative, and the environment wins. Off when neither is set. See [Error reporting](#error-reporting). |
@@ -355,7 +357,7 @@ adapter lets the subprocess run the built-in WebFetch at all.
 | `GET /v1/usage/quota/all` | Usage windows and Claude banked-reset grants with expiration dates for every profile (JSON) |
 | `POST /v1/usage/quota/reset` | Explicitly redeem a Claude banked reset with `profile`, `grantId` and caller-owned `requestId`; [request and outcome contract](../MONITORING.md#redeeming-a-banked-reset) |
 | `GET /settings` | Routing, SDK feature toggles, model pricing, telemetry storage, update-check, site-header and page layout UI |
-| `GET/PUT /settings/api/updates` | Read or set `checkForUpdates` (JSON `{"checkForUpdates": true}`); takes effect on the running proxy |
+| `GET/PUT /settings/api/updates` | Read or set `checkForUpdates` (JSON `{"checkForUpdates": true}`); takes effect on the running proxy. Also reports each loaded plugin's installed and latest version in `plugins`; turning it on also sends loaded plugins' npm package names to the registry |
 | `GET/PUT /settings/api/header` | Read or set `showHostname` (JSON `{"showHostname": true}`): name the machine beside the header's status; takes effect on the running proxy |
 | `GET/PUT /settings/api/layout` | Read or set the web pages' `layout`: `contained` (default, a centered column) or `wide` (spans the window, more cards per row). JSON `{"layout": "wide"}`, `null` to unset; applies on the next page load |
 | `GET /plugins` | Plugin management page (`/plugins/list`, `POST /plugins/reload` for JSON/actions) |
@@ -369,11 +371,12 @@ Illustrative health response excerpt (versions and status vary by installation):
   "build": { "source": "npm", "version": "1.50.0", "latest": "1.50.0", "updateAvailable": false },
   "auth": { "loggedIn": true, "email": "you@example.com", "subscriptionType": "max" },
   "mode": "internal",
-  "plugin": { "opencode": "configured" }
+  "plugin": { "opencode": "configured", "pi": "not-configured" }
 }
 ```
 
 `plugin.opencode` is `"configured"` when `meridian setup` has been run, `"not-configured"` otherwise.
+`plugin.pi` is `"configured"` when `meridian setup --client pi` has installed the Pi extension, `"not-configured"` otherwise.
 Claude and combined-provider health responses also carry `upstream.claude`, described under
 [Readiness and upstream reachability](#readiness-and-upstream-reachability).
 
@@ -510,6 +513,29 @@ Once on, it asks the npm registry's `dist-tags` endpoint (the same source
 the request path. If the registry is unreachable it keeps reporting the last
 version it saw rather than dropping the field. Toggling it in the UI applies to
 the running proxy; switching it off also clears `build.latest`.
+
+The same pass checks every loaded plugin installed from an npm package, so
+**turning the check on also sends the npm package name of each loaded plugin to
+the registry** (one switch covers both checks; there is no separate one for
+plugins). A plugin's package is the nearest `package.json` above the
+file Meridian loaded, which gives its name and installed version. A lone file
+dropped into `plugins/` (or a symlink to one), a private package, a package
+whose `publishConfig.registry` names a non-public registry other than the
+one being asked, and a
+package.json that is not a JSON object are listed as not checkable, with the
+reason. When `MERIDIAN_UPDATE_CHECK_URL` points Meridian's own check at a
+mirror and `MERIDIAN_UPDATE_CHECK_REGISTRY` is unset, no plugin is checked and
+every plugin says to set `MERIDIAN_UPDATE_CHECK_REGISTRY`. Each package is asked
+once per interval however many plugins share it, at most four at a time and all
+within one 5s deadline (so switching the check on answers in about 5s even on a
+network that drops the requests), cached to
+`~/.cache/meridian/plugin-update-check.json`, and a failed lookup is reported on
+that plugin with the last version it saw. A plugin added by **Reload Plugins**
+is checked at once. The results are listed under **Updates** on `/settings` and
+in `plugins` on `GET /settings/api/updates`: per plugin `name`, `path`,
+`status`, `checkable` (`reason` when false), `package`, `installed`, `latest`,
+`updateAvailable`, `checkedAt` and `error`. The list is present while the
+check is off, without `latest`.
 `MERIDIAN_NO_UPDATE_CHECK=1` forces it off regardless of the setting, so a
 fleet can refuse the call in one place. The launcher script's own install-time
 check below is separate and has its own switch.
@@ -903,7 +929,8 @@ when their opening text and working directory match.
 | `jcode` | `x-jcode-session` |
 | `letta` | The `conv-<uuid>` id in the agent-info block Letta places in its opening user message (no session header) |
 | `passthrough` (LiteLLM) | `x-litellm-session-id` |
-| `cherry`, `openai` | Inherit OpenCode header handling; a headerless generic OpenAI tool loop additionally gets a derived `tool-loop:<hash>` key, so it resumes instead of packing |
+| `cherry` | Inherits OpenCode header handling |
+| `openai` | OpenCode header handling, then `x-session-id`; a headerless generic OpenAI tool loop additionally gets a derived `tool-loop:<hash>` key, so it resumes instead of packing |
 | `polytoken` | Nonblank `x-polytoken-conversation`, falling back to `x-polytoken-session` |
 | `droid`, `forgecode` | none — fingerprint fallback |
 
@@ -1065,6 +1092,7 @@ Every request line carries `lineage=`, and every divergence also carries
 | `undo-gap` | An undo whose rollback point would omit supplied history |
 | `unrelated-history` | The key resolved to a different conversation |
 | `missing-session-header` | An OpenCode request arrived without its session header |
+| `moved-on-elsewhere` | Another profile's copy, used since, holds more of the history; this profile's older copy would drop the replies given there, so the turn replays |
 | `concurrent-race`, `priority-failback` | Lost a commit race; routed to another profile |
 | `independent-request:headerless-tool-result` | The client-driven tool loop above |
 | `independent-request:fork-source` | Declared `x-meridian-source: fork-*` |
@@ -1164,6 +1192,98 @@ Clients just set their `ANTHROPIC_API_KEY` to the shared secret — since most t
 ```bash
 ANTHROPIC_API_KEY=your-secret-key ANTHROPIC_BASE_URL=http://meridian-host:3456 opencode
 ```
+
+## Session bookkeeping maintenance
+
+Node 22: `meridian-bookkeeping <command> --session-dir /absolute/private/session-directory [--json]`.
+The npm entry is `dist/session-bookkeeping.js`; this is not a proxy request endpoint.
+Docker images include `/app/dist/session-bookkeeping.js`; invoke it with
+`--entrypoint node` and the same private session-directory mount while writers
+are stopped. Use a supported local filesystem for that mount; the container
+writable overlay is not a supported SQLite data directory.
+
+* `inspect` is read-only, holds a shared maintenance guard when one exists, and can run beside live proxies.
+* Stop/drain **all** writers, then `migrate --writers-stopped`. The flag is the operator's assertion,
+  not a conclusion from an empty lease table. Missing `--writers-stopped` exits **2**.
+  An already READY store returns 0 without a new transition.
+* `export-json` returns to legacy JSON, preserving current database documents, then releases its barriers.
+* `abort-migration` reverses only a pre-database BARRIERS failure; otherwise resume migration or export.
+* `recanonicalize` repairs derived mapping paths offline; resource rekeying requires export/correction/migrate.
+
+After EXPORTED or ABORTED, a new migration archives the prior cycle in
+`bookkeeping-cycles/<migration_id>/` before preparing a new cycle. An interrupted archival move resumes
+from `session-bookkeeping-cycle.json`. Never move individual files by hand. The guard database, journals,
+archived cycles, main database and WAL/SHM belong to the backup boundary.
+
+Exit codes (all commands): **0** completed/already target; **2** usage; **3** refusal before transition
+(quiescence, live/unknown candidate/gate, busy guard, capacity); **4** refusal with barriers or export already
+active; **5** corrupt/unreadable state or replaced barrier; **6** caller uid differs from directory owner.
+Code 3 permits the old binary only when the starting state was legacy; it does not undo a pre-existing READY
+transition. Code 4 means **do not start legacy writers**: resume `migrate`, use `abort-migration` before any
+database creation, or resume `export-json`. UID mismatch handling is implemented but not privilege-tested.
+
+`inspect --json` reports `phase` (`legacy`, `prepared`, `barriers`, `imported`, `ready`, `exporting`,
+`exported`, `aborted`, or `corrupt`), `migration_id`, `cycle_id`, `cycle_number`, `archived_cycles`, resource
+counts by state, mappings, main/WAL/SHM sizes, barrier ownership (`own`, `foreign`, `none`), `candidates`,
+`gates` and `temporary` residue lists, each with a relative `path` and `verdict`.
+Incarnations proven dead are `dead-incarnation`; `live` requires an OS observation of a live process.
+Darwin's second-resolution start time cannot prove incarnation equality, but an observed live process
+at that identity still refuses maintenance. Unobservable/malformed identities are `unknown`.
+Gate files do not persist an incarnation, so their verdict is `unknown`, never inferred from PID/age.
+`temporary` lists `session-gc.json.tmp-<pid>-<uuid>` and `sessions.json.tmp-<pid>-<uuid>` files,
+empty or nonempty, with byte size and SHA256 (interrupted legacy atomic writes).
+A currently live local PID from the filename yields `live` and refuses maintenance; otherwise the verdict
+is `unknown`, not a proof of a dead incarnation. Under `--writers-stopped`, these files are archived
+intact as residue, never discarded because they are temporary or empty.
+`turn-locks/` is outside bookkeeping and is neither listed nor moved.
+An empty directory candidate lacking `owner.json` is `unknown` with `kind: "incomplete-candidate"`,
+not corruption. Its original inode is captured by rename into a fresh UUID name under `residue/`, recorded
+as `archiveName` in the migration journal before the move. An adjacent `<private-name>.manifest.json`
+records source, private path, before/after device and inode, reason, and time. No source rmdir is used.
+If identity differs after capture, the directory stays private and exit 5 names its location and manifest:
+**nothing was deleted**. The operator must inspect it. There is deliberately no automatic directory rename
+back to a public name: POSIX rename could overwrite a newly occupied empty directory. A nonempty source
+observed before capture is refused without moving it.
+
+For `migrate --writers-stopped`, the operator attests that all proxies **and SDK/deletion children**
+have stopped. Under that attestation, unknown/dead residues are moved, not deleted, to
+`bookkeeping-cycles/<migration_id>/residue/<relative-path>`. The PREPARED migration journal records
+`residues` (path, verdict, SHA256, bytes, device/inode); the command returns the same list in
+`result.residues`. File archival uses no-clobber links followed by journaled private capture of the source;
+only that private name is deleted. Directory archival preserves the directory rather than copying/removing it.
+A live candidate refuses migration with its address (3 from legacy; 4 if barriers are already active).
+Other maintenance commands do not accept unknown candidates/gates. An already-ready CLI migrate is a
+no-op and does not archive newly appeared residues. The current cycle's residue directory does not count
+as an archived cycle. Inspection alone only reports residues, without applying the operator attestation.
+**Deletion invariant:** bookkeeping never calls unlink/rmdir on a public name. Every retirement first
+records a fresh private UUID name and observed identity durably, captures the public name by rename, and
+checks the captured inode. Only `PrivatePath` capabilities reach the deletion wrappers. Barrier intent
+lives in the migration journal; other file retirements have private `.deletion-intent.releasing-*` journals.
+If the captured file is foreign, restoration uses link (never overwrite): EEXIST leaves the private file
+intact and returns 5. Resume accepts the recorded identity; a missing capture with the original still public
+starts a new capture with a new UUID. The accepted POSIX limit is that another process cannot name a newly
+generated private UUID; the stop/drain attestation excludes live coordinators. Directory mismatch is
+fail-closed without automatic restoration, at the operator's explicitly accepted recovery cost.
+A foreign SQLite database without a migration journal refuses migration with 3 before guard creation.
+If it appears between preflight and guard acquisition, the operation releases its lease and retires only
+the guard inode it published itself, leaving the foreign main/WAL/SHM untouched. A pre-existing guard is
+not adopted as disposable. Ordinary durable journal publication remains the metadata-write protocol;
+the invariant above governs file retirement and restoration, not disabling journal updates.
+Inspection never repairs permissions or bootstraps a missing guard. WAL without SHM requires offline recovery
+rather than creating SHM during inspection. Without `--json`, output is indented for human reading.
+
+All JSON output includes `timings.total_ms` and `timings.phases` (`phase`, `duration_ms`); use measured
+production-size transitions to choose systemd `TimeoutStartSec`, not a guessed constant.
+
+Both permanent legacy lock files (`session-gc.json.lock`, `sessions.json.lock`) contain one JSON line:
+
+```json
+{"backend":"sqlite","migration_id":"<uuid>","format":"meridian-bookkeeping-barrier-v1","instruction":"Stop all writers; use meridian-bookkeeping export-json. Never delete this barrier manually."}
+```
+
+This deliberately lacks the legacy canonical pid/incarnation/token owner tuple. Never delete these markers
+manually. Release temporarily uses `<lock>.releasing-<migration_id>` and resumes after a crash from that name.
+Old-package negative-write probes are a separate acceptance step; this command alone is not evidence for them.
 
 ## CLI Commands
 
@@ -1527,3 +1647,192 @@ Git output is capped at 2 MiB, metadata at 4 MiB (package metadata 1 MiB).
 Oversized or unavailable inputs report unavailable/invalid provenance rather
 than certifying a partial hash. A local certified build refuses such inputs;
 Git-less archives retain their uncertified build path.
+
+# SQLite session bookkeeping
+
+Set `MERIDIAN_BOOKKEEPING=sqlite` to explicitly use SQLite for both transcript
+lifecycle and cross-proxy session mappings. The default is `json` for existing
+installations. `MERIDIAN_SESSION_DIR` selects the shared private directory.
+Once a directory contains SQLite or active maintenance journals, JSON startup
+refuses it rather than creating a second authority. Never remove lock barriers
+by hand.
+
+The runtime must provide SQLite with the upstream WAL-reset fix: 3.51.3 or
+later, or the 3.44.6/3.50.7 backports. Node 22.22.3 includes SQLite 3.51.3;
+use a Node release whose built-in engine meets this requirement. The actual
+version and source ID are checked in memory before opening a persistent main
+database or maintenance guard. Older engines fail initialization with upgrade
+guidance. The default JSON backend is unaffected.
+
+Bun uses its own SQLite API and, on macOS, normally loads the OS library.
+Its version can therefore differ from Node's. Advanced Bun embedders may select
+a patched library with Bun's `Database.setCustomSQLite()` before initialization;
+Meridian never changes that process-wide setting. Running the CLI with a
+qualified Node runtime is the direct option. Node 22 may print its standard
+experimental SQLite notice on stderr; structured command results remain on stdout.
+
+SQLite uses `session-bookkeeping.sqlite`, WAL, `synchronous=FULL`, foreign keys,
+`busy_timeout=0` and disabled automatic checkpoints. Use a local filesystem
+with working SQLite locks: Linux ext2/3/4, xfs, btrfs or tmpfs; macOS APFS.
+HFS/HFS+ and native Windows are outside the verified filesystem set and refuse
+normal SQLite initialization; the default JSON backend remains available.
+An unverified filesystem requires the explicit
+`BOOKKEEPING_ALLOW_UNVERIFIED_FS=1` escape hatch, not an assumed safety claim.
+The directory must belong to the service uid with mode 0700; database, journal,
+WAL and SHM files are private (0600). Corruption, incompatible schema, path
+identity drift or incomplete maintenance prevents startup, without salvage or
+JSON fallback. Windows migration/crash behavior needs separate platform evidence.
+
+An uncertain GC deletion remains fenced while its claiming proxy is alive or
+its identity is indeterminate. Recovery requires authoritative death of that
+proxy and its recorded executor, plus an empty process group on POSIX. A child
+exit alone does not release the original owner's child and pipe custody.
+
+## Explicit migration and rollback
+
+Stop and drain **every** proxy and its SDK/deletion children first. A missing
+lock file is not proof that a writer stopped. Back up the whole directory,
+including journals and WAL, and provide sufficient free space for the database,
+source backups and migration journals. Then run:
+
+```sh
+meridian-bookkeeping inspect --session-dir /private/session-dir --json
+meridian-bookkeeping migrate --session-dir /private/session-dir --writers-stopped --json
+MERIDIAN_BOOKKEEPING=sqlite MERIDIAN_SESSION_DIR=/private/session-dir meridian
+```
+
+Starting the server or calling initialization is **not** permission to import
+legacy JSON. Fresh empty directories bootstrap READY atomically; legacy
+directories require the explicit migration command. Migration preserves source
+JSON backups and installs permanent barriers on both legacy lock names. Inspect
+phases are `legacy`, `prepared`, `barriers`, `imported`, `ready`, `exporting`,
+`exported` and `corrupt`. CLI exits: 0 success, 2 usage, 3 refusal before barriers,
+4 refusal after barriers/export, 5 corrupt/foreign authority, 6 wrong uid.
+An interrupted transition is resumed with its explicit maintenance command.
+
+To return to a legacy binary, stop/drain all writers again, then run the new
+package's command **before replacing the package**:
+
+```sh
+meridian-bookkeeping export-json --session-dir /private/session-dir --json
+```
+
+Fresh SQLite directories use the same durable migration identity and both legacy
+lock barriers as an empty-input migration. READY is inspectable/exportable;
+interrupted fresh bootstrap requires explicit `migrate --writers-stopped` (or a
+safe abort), never implicit adoption of an unjournaled database. Import planning
+executes the actual codecs/DDL in a disposable memory transaction before changing
+authority and repeats under maintenance ownership. Invalid scalar NUL, unsafe
+integers or row/constraint violations leave legacy source bytes, journals and
+barriers unchanged. Historical failed imports can be aborted only if their
+PREPARED database is provably empty: no mappings/resources/leases/history/fences
+or imported provenance. READY/nonempty authority is never discarded by abort.
+
+After successful export or abort, this same build may start with
+`MERIDIAN_BOOKKEEPING=json` only with validated terminal history, completed barrier
+release and no active SQLite main/WAL/SHM/journal. Export archives are checked;
+incomplete, substituted or foreign history does not authorize JSON fallback.
+
+Post-READY crash gates contain no incarnation proving the child dead. Ordinary
+export refuses unknown gates. After explicitly stopping/draining **all** SDK and
+deletion children, use:
+
+```sh
+meridian-bookkeeping export-json --session-dir /private/session-dir --writers-stopped --json
+```
+
+This records archive intent in the migration journal and uses the existing
+no-clobber/inode-checked residue archive. It resumes interrupted archival, including
+private captures within gate directories. A positively live or indeterminate
+ledger owner still refuses; attestation is not permission to invent process death.
+
+The published maintenance guard is permanent; refused operations never retire it.
+Historical guard-retirement intents/captures block ordinary commands **before**
+opening the guard or bootstrapping a replacement. Only after stopping every old
+runtime and maintainer (including children), the following explicit recovery can
+restore/link and exclusively lock the **original recorded inode**, then cancel
+only its private retirement intent/aliases:
+
+```sh
+meridian-bookkeeping recover-guard-retirement --session-dir /private/session-dir --writers-stopped --json
+```
+
+A different public inode, conflicting intents, missing original inode or invalid
+guard format refuses. Keep writers stopped and use an operator-approved coherent
+backup restore; never unlink/replace the public guard, change recorded dev/ino,
+or delete barriers manually. Recovery after copying an intent to a different
+filesystem is not implicit permission to rehome that identity.
+
+Run inspection through a **separate CLI process** beside a live proxy. In-process
+inspection refuses while any local SQLite owner exists (including alias paths):
+opening/closing an auxiliary descriptor for a POSIX lock-bearing inode can revoke
+the owner's OS locks even when SQLite still reports an active transaction.
+
+If a crash occurred after bootstrap's temporary-to-public hardlink but before
+private alias retirement, `inspect` reports `temporary.kind=bootstrap-alias`
+without mutating/opening that SQLite inode. This is diagnostic residue, not a
+certification that runtime can serve. Recover through the CLI only:
+
+```sh
+meridian-bookkeeping recover-bootstrap --session-dir /private/session-dir --writers-stopped --json
+meridian-bookkeeping migrate --session-dir /private/session-dir --writers-stopped --json
+```
+
+`migrate --writers-stopped` and `export-json --writers-stopped` can run this
+recovery before their normal phase checks. Recovery locks the published original
+guard exclusively, including the first-guard link window, before alias cleanup;
+it never opens/closes an auxiliary descriptor for that SQLite inode. A valid
+owner record must prove the exact bootstrap process dead; stopped attestation
+does not override live, ambiguous or missing ownership. Inode mismatch/foreign
+hardlinks refuse without deletion/adoption. Public main/guard identities stay
+unchanged. Private capture/intent/write names are bounded to filesystem NAME_MAX
+in UTF-8 bytes; legacy pending names remain readable and resumable.
+
+Use the freshly exported JSON, never the original migrated backups: those omit
+all later publications and fence advances. Do not start an old binary until
+export completes and its barriers have been released. Retain the cycle/archive
+files for recovery. A corrupt database requires an operator's restore decision,
+not automatic rollback.
+
+## Admission and embedding
+
+The SQLite async admission budget is the maximum of
+`MERIDIAN_SESSION_GC_LOCK_WAIT_MS` (default 2000 ms) and
+`MERIDIAN_SESSION_LOCK_TIMEOUT_MS` (default 10000 ms). The latter is the legacy
+store-lock setting, now a compatibility synonym in the common budget; corresponding
+`CLAUDE_PROXY_*` aliases remain accepted. Explicit library `lockWaitMs=0` means
+one BEGIN attempt, not a blocking retry. `lockRetryMs` controls asynchronous
+retry timing. Legacy `lockStaleMs` cannot recover SQLite locks. An exhausted
+budget gives typed overload; HTTP server paths answer 503, not an SDK timeout.
+Synchronous library writers outside admission can immediately throw typed busy.
+
+`startProxyServer` handles initialization and owned shutdown. For synchronous
+embedders:
+
+```js
+const handle = await initializeProxyBookkeeping()
+const proxy = createProxyServer(config)
+// Serve proxy.app.fetch, then stop admissions and drain outstanding requests.
+proxy.beginDrain?.()
+await proxy.closeBackend?.()
+await handle?.close()
+```
+
+The exported `clearSessionCache()` resets memory immediately and returns
+`Promise<void>` under the approved #1244/#1277 contract. Use
+`await clearSessionCache()` before relying on completed durable cleanup or
+closing its bookkeeping owner. SQL cleanup waits in the existing bounded
+writer queue; later publications survive. Cleanup retains its best-effort
+error policy, so fulfillment alone does not certify that an unavailable store
+was cleared. JSON remains the default and performs its cleanup synchronously
+before returning the promise.
+
+Keep the directory/backend fixed for the lifetime of these owners. Closing one
+proxy never closes another owner's connection. The returned handle is opaque:
+it exposes only idempotent `close(): Promise<void>`, with repeated calls joining
+the same promise. Successful close waits for the final owner's admitted durable
+work. If its two-second close budget expires, it rejects and retains ownership
+until that original work joins; a rejected close is not permission to start
+offline maintenance. Unknown COMMIT outcomes are not
+replayed and do not authorize retiring a possibly published transcript. Periodic
+GC performs a PASSIVE checkpoint; physical WAL shrinking is an offline operation.

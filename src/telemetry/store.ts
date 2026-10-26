@@ -16,15 +16,24 @@ const DEFAULT_CAPACITY = 1000
  *  uses. A value that is not a positive integer is discarded at each step
  *  rather than falling through, so a typo cannot produce a zero-length ring. */
 export function resolveTelemetryCapacity(): number {
-  const raw = process.env.MERIDIAN_TELEMETRY_SIZE ?? process.env.CLAUDE_PROXY_TELEMETRY_SIZE
-  if (raw) {
-    const parsed = Number.parseInt(raw, 10)
-    if (Number.isFinite(parsed) && parsed > 0) return parsed
-    return DEFAULT_CAPACITY
-  }
+  const fromEnv = telemetryCapacityFromEnv()
+  if (fromEnv !== undefined) return fromEnv ?? DEFAULT_CAPACITY
   const saved = getSetting("telemetrySize")
   if (typeof saved === "number" && Number.isFinite(saved) && saved > 0) return Math.floor(saved)
   return DEFAULT_CAPACITY
+}
+
+/**
+ * What MERIDIAN_TELEMETRY_SIZE (else CLAUDE_PROXY_TELEMETRY_SIZE) contributes
+ * to resolveTelemetryCapacity: the size it sets; null when it is set but not a
+ * positive integer, so the default applies; undefined when it is unset or
+ * empty, so the saved setting is consulted.
+ */
+export function telemetryCapacityFromEnv(): number | null | undefined {
+  const raw = process.env.MERIDIAN_TELEMETRY_SIZE ?? process.env.CLAUDE_PROXY_TELEMETRY_SIZE
+  if (!raw) return undefined
+  const parsed = Number.parseInt(raw, 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null
 }
 
 export class MemoryTelemetryStore implements ITelemetryStore {

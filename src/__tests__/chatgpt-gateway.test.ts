@@ -156,7 +156,7 @@ const LUNA = {
   prompt_cache_key: "conversation-1", // gitleaks:allow - a conversation id, not a credential
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), "chatgpt-gateway-"))
   process.env.MERIDIAN_CONFIG_DIR = join(dir, "meridian")
   poolDir = join(dir, "opencode")
@@ -173,7 +173,7 @@ beforeEach(() => {
   wham = () => undefined
   globalThis.fetch = mockFetch as typeof fetch
   telemetryStore.clear()
-  clearSessionCache()
+  await clearSessionCache()
   __setFetchOAuthUsageOverride(async () => null)
   // Another suite in the same process may have switched usage reads off, or
   // left a Claude `default` reading cached.

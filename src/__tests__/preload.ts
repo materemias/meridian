@@ -6,6 +6,7 @@
 import { afterAll } from "bun:test"
 import { mkdirSync } from "node:fs"
 import { tmpdir } from "node:os"
+import "./fixtures/bookkeeping-engine-preload.mjs"
 import { removeTestDir, sweepStaleTestDirs, testDirsFor } from "./test-tmp-dirs"
 
 // Take the operator's whole configuration namespace away from the suite.

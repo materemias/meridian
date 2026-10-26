@@ -93,8 +93,8 @@ function expectImageDelivered(content: any[]) {
 }
 
 describe("/v1/responses image input reaches the SDK", () => {
-  beforeEach(() => {
-    clearSessionCache()
+  beforeEach(async () => {
+    await clearSessionCache()
     capturedPrompt = null
   })
 
@@ -115,8 +115,8 @@ describe("/v1/responses image input reaches the SDK", () => {
 })
 
 describe("/v1/responses PDF input reaches the SDK", () => {
-  beforeEach(() => {
-    clearSessionCache()
+  beforeEach(async () => {
+    await clearSessionCache()
     capturedPrompt = null
   })
 

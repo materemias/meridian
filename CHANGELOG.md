@@ -1,5 +1,44 @@
 # Changelog
 
+## [1.86.0](https://github.com/rynfar/meridian/compare/meridian-v1.85.0...meridian-v1.86.0) (2026-10-26)
+
+
+### Features
+
+* add the Meridian Pi extension and meridian setup --client pi ([#1408](https://github.com/rynfar/meridian/issues/1408)) ([bd02173](https://github.com/rynfar/meridian/commit/bd021733deb054bbb95cacc0383fa816469e5773))
+* read x-session-id as conversation identity on /v1/chat/completions ([#1426](https://github.com/rynfar/meridian/issues/1426)) ([a5a939b](https://github.com/rynfar/meridian/commit/a5a939be8e3bd43e73b8750963900568530e6445))
+
+
+### Bug Fixes
+
+* **antigravity:** compact older assistant text in active tool loops ([#1437](https://github.com/rynfar/meridian/issues/1437)) ([075e9e4](https://github.com/rynfar/meridian/commit/075e9e4736d3457e12dda1a0108531b9b5843e96))
+* **chatgpt:** release a turn that fails before reaching the backend ([#1440](https://github.com/rynfar/meridian/issues/1440)) ([c84af24](https://github.com/rynfar/meridian/commit/c84af243708578c0f15c92acad90fa68e364aaa9))
+* **pi:** tier in-process pi-subagents children whose prompt is appended ([#1453](https://github.com/rynfar/meridian/issues/1453)) ([5359f63](https://github.com/rynfar/meridian/commit/5359f63404645e6f44b335c5ba4f0dc755f5f7c5))
+* require the Pi scrub in the live Pi harness and tell Pi users they need it ([#1452](https://github.com/rynfar/meridian/issues/1452)) ([cb767de](https://github.com/rynfar/meridian/commit/cb767defa07c27e1459f7616cfa36129584a5db4))
+
+## [1.85.0](https://github.com/rynfar/meridian/compare/meridian-v1.84.0...meridian-v1.85.0) (2026-10-21)
+
+
+### Features
+
+* **session:** add opt-in SQLite bookkeeping with offline recovery ([91df1ba](https://github.com/rynfar/meridian/commit/91df1ba233593e53118c2e9184f5a13d1d0f8902))
+
+
+### Bug Fixes
+
+* **docker:** include the session bookkeeping maintenance CLI and verify migration, awaited cleanup and export in the runtime image.
+* run native Claude Code backend sessions in the client working directory ([#1395](https://github.com/rynfar/meridian/pull/1395))
+* probe SDK wrapper identity asynchronously with a bounded deadline ([#1394](https://github.com/rynfar/meridian/pull/1394))
+* stop priority-routed generation when its parent client cancels or shuts down ([#1397](https://github.com/rynfar/meridian/pull/1397))
+* apply OpenCode instructions after a primary-agent switch ([#1423](https://github.com/rynfar/meridian/issues/1423)) ([5187ee2](https://github.com/rynfar/meridian/commit/5187ee293917896d90bf9829ee90daf3d9680b9a))
+* deliver Responses input_file PDFs as document blocks ([acb8d39](https://github.com/rynfar/meridian/commit/acb8d390e4d764e5d2e7a9b7c60fb17df47c25dd))
+* isolate client-owned passthrough from proxy-host settings and MCP discovery ([#1406](https://github.com/rynfar/meridian/issues/1406)) ([90e9349](https://github.com/rynfar/meridian/commit/90e934976d760e9c3af68c2c0eccffdb8a6fd061))
+* keep consecutive user messages in the current turn ([a2c19df](https://github.com/rynfar/meridian/commit/a2c19dfa23d9d8586a1d9f286c5467a381052595))
+* **opencode:** skip the Claude Code preset for one-shot title and summary requests ([#1428](https://github.com/rynfar/meridian/issues/1428)) ([19ff3bc](https://github.com/rynfar/meridian/commit/19ff3bcac167cdcbbd91a6f79f7af07605a0ad99))
+* reject unreadable account session copies before resume ([3248387](https://github.com/rynfar/meridian/commit/32483870992ce3f953322cf6c1bf9bbdaede2469))
+* **session:** await ordered cache cleanup with immediate memory reset ([#1433](https://github.com/rynfar/meridian/issues/1433)) ([dcc1b8c](https://github.com/rynfar/meridian/commit/dcc1b8c9d78738217aaf4633659704db9b06bd11))
+* stop client reminder discovery at non-text content ([ea4c6a6](https://github.com/rynfar/meridian/commit/ea4c6a6f494b5a8897f31f76033bd60a8ec343a6))
+
 ## [1.84.0](https://github.com/rynfar/meridian/compare/meridian-v1.83.1...meridian-v1.84.0) (2026-10-19)
 
 

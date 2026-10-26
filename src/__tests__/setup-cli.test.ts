@@ -5,7 +5,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs"
 import { tmpdir, platform } from "os"
-import { join } from "path"
+import { delimiter, join } from "path"
 import { spawnSync } from "child_process"
 
 const repoRoot = join(import.meta.dir, "../..")
@@ -131,5 +131,75 @@ describe("meridian setup CLI", () => {
     expect(result.status).toBe(1)
     expect(result.stderr).toContain("Choose only one OpenCode generation")
     expect(() => readFileSync(configPath, "utf8")).toThrow()
+  })
+})
+
+describe("meridian setup --client", () => {
+  let root: string
+  let agentDir: string
+
+  let binDir: string
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "meridian-setup-client-test-"))
+    agentDir = join(root, "pi-agent")
+    // A supported Pi first on PATH, so the version gate never reads the
+    // developer's own installation.
+    binDir = join(root, "bin")
+    mkdirSync(binDir)
+    const windows = platform() === "win32"
+    const fakePi = join(binDir, windows ? "pi.cmd" : "pi")
+    writeFileSync(fakePi, windows ? "@echo off\necho 1.3.0\n" : "#!/bin/sh\necho 1.3.0\n")
+    if (!windows) chmodSync(fakePi, 0o755)
+  })
+
+  afterEach(() => rmSync(root, { recursive: true, force: true }))
+
+  function runSetup(args: string[]) {
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      FORCE_COLOR: "0",
+      PI_CODING_AGENT_DIR: agentDir,
+      PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
+      MERIDIAN_CONFIG_DIR: join(root, "meridian-config"),
+      OPENCODE_CONFIG_DIR: join(root, "opencode-config"),
+    }
+    delete env.MERIDIAN_OPENCODE_ATTESTATION_KEY
+    return spawnSync(process.execPath, [cliPath, "setup", ...args], {
+      cwd: repoRoot,
+      env,
+      encoding: "utf8",
+      timeout: 30_000,
+      windowsHide: true,
+    })
+  }
+
+  for (const args of [["--client", "pi"], ["--client=pi"]]) {
+    test(`installs the Pi extension for ${args.join(" ")}`, () => {
+      const result = runSetup(args)
+
+      expect(result.status).toBe(0)
+      if (platform() !== "win32") expect(result.stdout).toContain("installed for Pi 1.3.0")
+      expect(result.stdout).toContain("@rynfar/meridian-plugin-pi-scrub")
+      expect(readFileSync(join(agentDir, "extensions", "meridian", "index.ts"), "utf8"))
+        .toBe('export { default } from "./pi/index"\n')
+    })
+  }
+
+  for (const args of [["--client", "foo"], ["--client=foo"], ["--client"]]) {
+    test(`rejects ${args.join(" ")} without installing anything`, () => {
+      const result = runSetup(args)
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain("Choose --client opencode or --client pi")
+      expect(() => readFileSync(join(agentDir, "extensions", "meridian", "index.ts"))).toThrow()
+    })
+  }
+
+  test("rejects OpenCode generation flags for Pi", () => {
+    const result = runSetup(["--client", "pi", "--v2"])
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain("only apply to --client opencode")
   })
 })

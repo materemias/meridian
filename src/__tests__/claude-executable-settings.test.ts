@@ -69,7 +69,7 @@ describe("Claude Code executable setting", () => {
     return path
   }
 
-  beforeEach(() => {
+  beforeEach(async () => {
     dir = mkdtempSync(join(tmpdir(), "meridian-claude-executable-"))
     bin = join(dir, "bin")
     mkdirSync(bin)
@@ -80,7 +80,7 @@ describe("Claude Code executable setting", () => {
     process.env.PATH = `${bin}:${saved.PATH ?? ""}`
     resetCachedClaudePath()
     resetCachedClaudeAuthStatus()
-    clearSessionCache()
+    await clearSessionCache()
     ranWith.length = 0
     proxy = createProxyServer({ port: 0, host: "127.0.0.1", silent: true })
     app = proxy.app
@@ -214,6 +214,8 @@ describe("Claude Code executable setting", () => {
     expect(state.mode).toBe("custom")
     expect(state.envOverride).toEqual({ path: fromEnv, source: "env", version: "9.9.3" })
     expect(state.active).toEqual({ path: fromEnv, source: "env", version: "9.9.3" })
+    // The documented state carries no extra field naming the variable; the page names it.
+    expect(state).not.toHaveProperty("envSource")
     expect(await turn(false)).toBe(fromEnv)
   })
 

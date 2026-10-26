@@ -19,6 +19,10 @@ jobs:
           node-version: "22"
 
       - uses: oven-sh/setup-bun@v2
+        with:
+          # Linux Bun statically links SQLite. The package-manager default
+          # embeds 3.51.2, which correctly fails bookkeeping's WAL-reset gate.
+          bun-version: "1.4.3"
 
       - run: bun install
       - run: npm run typecheck

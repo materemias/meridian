@@ -124,11 +124,11 @@ const history = [
   { role: "user", content: "now read it back to me" },
 ]
 
-beforeEach(() => {
+beforeEach(async () => {
   mockMessages = [assistantMessage([{ type: "text", text: "ok" }])]
   capturedParams = null
   queuedSessionIds = []
-  clearSessionCache()
+  await clearSessionCache()
   clearSharedSessions()
 })
 
@@ -161,7 +161,7 @@ describe("Issue #386 — tool_use blocks must not leak into SDK prompt as text",
     ], "sdk-rehydrate")
 
     // Simulate proxy restart: wipe in-memory cache (shared store remains)
-    clearSessionCache()
+    await clearSessionCache()
 
     // Turn 2 — same session header, full history with tool_use blocks
     capturedParams = null
@@ -251,8 +251,8 @@ describe("tool-result attribution on full-history replay (#552)", () => {
     },
   ]
 
-  beforeEach(() => {
-    clearSessionCache()
+  beforeEach(async () => {
+    await clearSessionCache()
     clearSharedSessions()
     capturedParams = null
     mockMessages = [assistantMessage([{ type: "text", text: "You created tmp/test2.txt" }])]

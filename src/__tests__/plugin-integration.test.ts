@@ -74,10 +74,10 @@ describe("Plugin integration — end-to-end via HTTP", () => {
   let externalPluginDir: string
   let pluginConfigPath: string
 
-  beforeEach(() => {
+  beforeEach(async () => {
     mockMessages = [assistantMessage([{ type: "text", text: "ok" }])]
     capturedParams = null
-    clearSessionCache()
+    await clearSessionCache()
     clearSharedSessions()
 
     pluginDir = mkdtempSync(join(tmpdir(), "plugin-integ-dir-"))

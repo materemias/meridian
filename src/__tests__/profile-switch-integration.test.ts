@@ -53,9 +53,9 @@ const { createProxyServer } = await import("../proxy/server")
 const { resetActiveProfile } = await import("../proxy/profiles")
 const { storeSession, lookupSession, clearSessionCache } = await import("../proxy/session/cache")
 
-beforeEach(() => {
+beforeEach(async () => {
   resetActiveProfile()
-  clearSessionCache()
+  await clearSessionCache()
 })
 
 function createTestApp(profiles?: Array<{ id: string; claudeConfigDir?: string; aliases?: string[] }>) {

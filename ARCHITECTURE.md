@@ -1,6 +1,52 @@
+---
+id: architecture
+type: architecture-design
+title: Meridian architecture
+status: active
+parent: meridian
+references:
+  - api-contract
+  - design-language
+---
+
 # Architecture
 
-A local proxy that bridges supported Anthropic- and OpenAI-compatible clients to Claude through the Agent SDK or Antigravity through the official agy CLI. This document defines the module structure, dependency rules, and design decisions.
+A local proxy that bridges supported Anthropic- and OpenAI-compatible clients to Claude through the Agent SDK, Antigravity through the official agy CLI, or (opt-in) ChatGPT subscription seats. This document defines the module structure, dependency rules, and design decisions.
+
+## Module specs
+
+Each module has a short spec stating its responsibility and boundary; the
+detailed contracts stay in the sections below and are linked from there.
+
+| Module | Spec | Code |
+|---|---|---|
+| Proxy core (HTTP orchestration, admission, cancellation, translation, models) | [`proxy-core`](src/proxy/SPEC.md) | `src/proxy/` (top-level files) |
+| Client adapters & transforms | [`adapters`](src/proxy/adapters/SPEC.md) | `src/proxy/adapters/`, `src/proxy/transforms/`, `adapter.ts`, `transform.ts` |
+| Sessions & bookkeeping | [`session`](src/proxy/session/SPEC.md) | `src/proxy/session/`, `sessionStore.ts`, `sessionLifecycle.ts`, `executionHistory.ts` |
+| Profiles, auth & routing | [`profiles-routing`](src/proxy/profiles-routing.spec.md) | `src/proxy/profile*.ts`, `routing.ts`, `rateLimitStore.ts`, `auth*.ts` |
+| User plugins | [`plugins`](src/proxy/plugins/SPEC.md) | `src/proxy/plugins/` |
+| Antigravity backend | [`antigravity-backend`](src/proxy/backends/SPEC.md) | `src/proxy/backends/antigravity*.ts` |
+| ChatGPT backend | [`chatgpt-backend`](src/proxy/chatgpt/SPEC.md) | `src/proxy/chatgpt/`, `codex/`, `upstream/`, `instanceImport/`, `backends/chatgpt*.ts` |
+| Telemetry & web UI | [`telemetry-ui`](src/telemetry/SPEC.md) | `src/telemetry/` |
+| Desktop app | [`desktop-app`](apps/desktop/SPEC.md) | `apps/desktop/` |
+| Client integrations | [`client-integrations`](plugin/SPEC.md) | `plugin/` |
+
+Module-level dependencies (the main edges and the prohibitions that matter, not
+an exhaustive allow-list; file-level rules follow in
+[Dependency Rules](#dependency-rules)):
+
+- `proxy-core` orchestrates every other server module. Its leaf modules
+  (`messages`, `tools`, `fileChanges`, `retryAfter`, the pure OpenAI
+  translators, …) may be imported by the other server modules.
+- `adapters` uses `session` (fingerprinting) and `profiles-routing`
+  (attestation), and owns the transform pipeline that `plugins` extends.
+- `chatgpt-backend` reuses `session` durability primitives, `profiles-routing`
+  and `telemetry-ui` pricing/presentation; `profileCli.ts` reaches back into
+  `chatgpt/seatCli` because one `meridian profile` CLI covers both providers.
+- `antigravity-backend` never imports `session`.
+- `telemetry-ui` is a leaf over settings/config that the other modules may use.
+- `desktop-app` and `client-integrations` reach the server only over HTTP; the
+  desktop app shares only pure `telemetry-ui` presentation.
 
 ## Request Flow
 
@@ -75,6 +121,10 @@ server orchestration. The build packages self-contained retry integrations under
 `dist/antigravity-clients`; npm, Nix and Docker installations carry those assets.
 Setup prepares edits before writing, preserves unrelated settings, rejects malformed
 or conflicting input, creates private backups and uses per-file atomic replacement.
+`piSetup.ts` owns `meridian setup --client pi`: it copies the TypeScript Pi
+extension from `plugin/pi/` (with the shared `plugin/priority-attestation.ts`
+signer) into Pi's `extensions/meridian/`, replacing only a copy Meridian wrote,
+and provides the startup, `/health` and pluginless-request checks.
 `chatgpt/migrate/` implements `meridian chatgpt-migrate`: credential discovery
 (`sources.ts`), /proc scanning (`processes.ts`), opencode config resolution and
 jsonc editing (`opencodeConfig.ts`), stripping under oc-codex-multi-auth's own
@@ -106,8 +156,8 @@ arguments and native structured results. It never fetches remote references or
 coerces client data. Tool definitions travel in the prompt as well as MCP, so
 model calls do not depend on access to private CLI schema files.
 `antigravity.ts` adapts the standard Request/Response
-interface to Anthropic JSON/SSE. Only `server.ts` imports Hono and binds the
-public listener. Backend modules do not import Claude session or cache modules.
+interface to Anthropic JSON/SSE. Only `server.ts` binds the public listener;
+backend modules do not import Hono. Backend modules do not import Claude session or cache modules.
 
 The runtime maps contain live/warm conversations and outstanding tool correlations,
 like `sessionTree.ts`; they are not another durable session cache. Tool calls
@@ -200,7 +250,7 @@ src/
 │   ├── requestAbort.ts        ← HTTP request abort → SDK query abort bridge
 │   ├── runtimeCancelWarning.ts ← Startup warning under Bun, whose HTTP server misses a client gone before the first byte (leaf)
 │   ├── sessionTree.ts         ← Live parent→child request registry; subtree cancellation (PURE bookkeeping)
-│   ├── shutdown.ts            ← Bounded HTTP drain and connection tracking
+│   ├── shutdown.ts            ← HTTP drain, retained cleanup deadlines and connection tracking
 │   ├── inflight.ts            ← Per-upstream in-flight request counts for GET /inflight (PURE bookkeeping)
 │   ├── admissionHold.ts       ← Bounded per-instance generation reservations for the best-effort POST /drain hold
 │   ├── drainBody.ts           ← Tiny operator body byte/deadline limits and joined reader cancellation
@@ -209,8 +259,19 @@ src/
 │   ├── upstreamReachabilityConfig.ts ← Dynamic environment/settings acquisition injected by server orchestration
 │   ├── adapter.ts             ← AgentAdapter interface (extensibility point for multi-agent support)
 │   ├── adapters/
+│   │   ├── detect.ts          ← Ordered client detection (see docs/development.md#agent-detection)
 │   │   ├── opencode.ts        ← OpenCode adapter (session headers, CWD extraction, tool config)
-│   │   └── forgecode.ts       ← ForgeCode adapter (fingerprint sessions, XML CWD, passthrough)
+│   │   ├── forgecode.ts       ← ForgeCode adapter (fingerprint sessions, XML CWD, passthrough)
+│   │   └── …                  ← claudecode, pi, prime, codex, crush, droid, jcode, letta, cherry, polytoken, openai, passthrough
+│   ├── transforms/            ← Built-in per-adapter transforms, registered in registry.ts
+│   ├── transform.ts           ← Transform interface and pipeline runner (adapters and plugins)
+│   ├── plugins/               ← User plugin loader, validation, stats and plugin page
+│   ├── backends/              ← Antigravity runtime (antigravity*.ts), ChatGPT backend, provider status
+│   ├── upstream/              ← Provider-neutral upstream seam: which provider serves a model
+│   ├── chatgpt/               ← ChatGPT seats: owned/follow-external sources, refresh, login; migrate/ CLI
+│   ├── codex/                 ← Read-only oc-codex-multi-auth pool reader and usage (never writes the pool)
+│   ├── instanceImport/        ← `meridian instance-import` (never imported by the server)
+│   ├── openai.ts, openaiResponses.ts ← Pure OpenAI Chat Completions / Responses translation
 │   ├── query.ts               ← SDK query options builder (shared between stream/non-stream paths)
 │   ├── errors.ts              ← Error classification (SDK errors → HTTP responses)
 │   ├── toolInputJson.ts       ← Tool input JSON repair for raw control characters in strings (PURE)
@@ -234,6 +295,7 @@ src/
 │   ├── buildObserver.ts       ← Single-flight bounded disk observation cache
 │   ├── buildObservationWorker.ts ← Off-thread source/artifact observation
 │   ├── updateCheck.ts         ← Opt-in cached npm registry lookup for the newest published version
+│   ├── pluginUpdateCheck.ts   ← Same check for each loaded plugin's npm package, run in updateCheck's pass
 │   ├── tools.ts               ← Tool blocking lists, MCP server name, allowed tools
 │   ├── messages.ts            ← Content normalization, message parsing
 │   ├── replay.ts              ← Pure rendering of assistant calls and tool results for SDK replay
@@ -258,7 +320,8 @@ src/
 │   ├── agentDefs.ts           ← Subagent definition extraction from tool descriptions
 │   ├── agentMatch.ts          ← Fuzzy agent name matching
 │   ├── design.ts              ← Claude Design MCP proxy (token store/refresh, auth precedence, login flow)
-│   └── passthroughTools.ts    ← Tool forwarding mode (agent handles execution)
+│   ├── passthroughTools.ts    ← Tool forwarding mode (agent handles execution)
+│   └── session/bookkeeping/   ← Optional SQLite bookkeeping backend (see SQLite bookkeeping boundary)
 ├── fileChanges.ts             ← PostToolUse hook: tracks write/edit ops, formats summary
 ├── mcpTools.ts                ← MCP tool definitions (read, write, edit, bash, glob, grep)
 ├── logger.ts                  ← Logging with AsyncLocalStorage context
@@ -287,7 +350,9 @@ src/
 
 plugin/                       ← Repository root, alongside src/
 ├── meridian.ts               ← OpenCode V1 session header plugin
-└── meridian-v2.ts            ← OpenCode V2 plugin
+├── meridian-v2.ts            ← OpenCode V2 plugin
+├── priority-attestation.ts   ← Client-side human-turn signer (OpenCode and Pi)
+└── pi/                       ← Pi extension: meridian provider, catalog, request identity
 ```
 
 ## Dependency Rules
@@ -327,7 +392,7 @@ server.ts (HTTP layer)
 
 2. **`session/cache.ts` owns all mutable session state.** No other module should create or manage LRU caches for sessions.
 
-3. **`errors.ts`, `retryAfter.ts`, `toolInputJson.ts`, `models.ts`, `tools.ts`, `messages.ts`, `profiles.ts`, `profileCli.ts`, `buildInfo.ts`, `updateCheck.ts`, `sseFailureSniff.ts` are leaf modules.** They must not import from `server.ts`, `session/`, or `adapter.ts`. `buildInfo.ts`, `retryAfter.ts` and `toolInputJson.ts` are additionally pure — every export is a function of its arguments (plus `process.env` for `buildInfo.ts`), so the registry I/O lives in `updateCheck.ts` instead. `sseFailureSniff.ts` keeps pure framing separate from reader/queue lifecycle helpers; account selection, publication and durable settlement remain in `server.ts`.
+3. **`errors.ts`, `retryAfter.ts`, `toolInputJson.ts`, `models.ts`, `tools.ts`, `messages.ts`, `profiles.ts`, `profileCli.ts`, `buildInfo.ts`, `updateCheck.ts`, `pluginUpdateCheck.ts`, `sseFailureSniff.ts` are leaf modules.** They must not import from `server.ts`, `session/`, or `adapter.ts`. `buildInfo.ts`, `retryAfter.ts` and `toolInputJson.ts` are additionally pure — every export is a function of its arguments (plus `process.env` for `buildInfo.ts`), so the registry I/O lives in `updateCheck.ts` and `pluginUpdateCheck.ts` instead. `sseFailureSniff.ts` keeps pure framing separate from reader/queue lifecycle helpers; account selection, publication and durable settlement remain in `server.ts`.
 
 4. **`server.ts` owns Hono route registration and orchestration.** Hono
    middleware stays at the proxy boundary. Standard `Request`/`Response`
@@ -369,12 +434,13 @@ Agent-specific behavior is isolated behind the `AgentAdapter` interface (`adapte
 ### Current Adapters
 
 - **`adapters/opencode.ts`** — OpenCode agent (session headers, `<env>` block parsing, tool mappings, and recognized transient hook envelopes for lineage)
+- **`adapters/opencodeSourceFeatures.ts`** — One-shot OpenCode title/summary prompts replace the coding preset when client prompts are enabled; compaction, other adapters and client-prompt opt-outs keep their configured behavior.
 - **`adapters/forgecode.ts`** — ForgeCode agent (fingerprint sessions, `<current_working_directory>` parsing, `patch`/`shell` tool mappings)
 
 ### Adding a New Agent
 
 1. Create `adapters/myagent.ts` implementing `AgentAdapter`
-2. Wire it into `server.ts` (currently hardcoded to `openCodeAdapter`; future work will auto-detect)
+2. Register it in `adapters/detect.ts` (`ADAPTER_MAP` and, if it has a detection signal, the ordered detection list) and its built-in transforms, if any, in `transforms/registry.ts`
 3. No changes needed to `query.ts`, `session/`, or other infrastructure
 
 ### What the Adapter Controls
@@ -398,9 +464,100 @@ Agent-specific behavior is isolated behind the `AgentAdapter` interface (`adapte
 |-------|----------|--------|
 | `buildAgentDefinitions` | `agentDefs.ts`, `transforms/opencode.ts` | Pure OpenCode Task parser invoked by the adapter transform. |
 | Passthrough mode | `passthroughTools.ts` | Agent-agnostic but OpenCode-motivated. Keep as-is. |
-| `ALLOWED_MCP_TOOLS` usage in `server.ts` | Line ~176 | Used for `buildAgentDefinitions`. Move when adapter handles agent defs. |
 
 ## Session Management
+
+### SQLite bookkeeping boundary
+
+`bookkeeping/nativeDatabase.ts` owns all native main/guard opens. It uses
+`node:sqlite` under Node and `bun:sqlite` under Bun, without changing a host's
+global engine selection. Before any persistent native open it qualifies the
+runtime's version/source ID in memory and requires the upstream WAL-reset fix
+(3.51.3+, or the 3.44.6/3.50.7 backports). An unavailable or unpatched engine
+refuses SQLite initialization; it never falls back to libsql or JSON. The
+existing telemetry database continues to use its separate libsql boundary.
+URI read-only/immutable inspection is preserved. CAS uses SQLite's same-connection
+`changes()` count, excluding trigger side effects. Bun statements are finalized
+within each synchronous operation before strict native close; Node's numeric
+busy/locked results enter the existing asynchronous admission path. No SDK,
+filesystem or process probe is added to a row transaction.
+
+Maintenance correctness: published guard identity is permanent, and pending
+historical guard retirement refuses before native opens (explicit original-inode
+recovery only). Same-process inspection never opens auxiliary main/guard aliases
+while local owners exist; standalone CLI inspection remains supported. Fresh
+creation is the empty-input durable journal/barrier protocol, not a separate
+unjournaled authority. Legacy import representability is exercised through exact
+row codecs, triggers and schema in a disposable transaction before barriers, then
+rechecked under ownership. Terminal export/abort history is validated rather than
+treated as active authority merely because journals remain. Post-READY residue
+archival requires explicit stopped-child attestation and preserves the existing
+no-clobber archive protocol. See configuration and cold-maintenance regressions.
+
+`MERIDIAN_BOOKKEEPING=sqlite` explicitly selects the shared row-based backend
+for both lifecycle and session mappings. JSON remains the default for legacy
+installations; a SQLite directory never falls back to JSON. One database per
+session directory stores resources, full-incarnation leases, generation fences,
+mapping histories/pins and priority publication state. Histories are loaded for
+addressed lookups, not GC pin collection.
+
+`startProxyServer` awaits READY initialization before binding. Synchronous
+`createProxyServer` requires an initialized handle; embedders call the exported
+`initializeProxyBookkeeping` first and await both its opaque handle's async close
+and the proxy's `closeBackend` after draining. The public handle exposes only
+`close(): Promise<void>`; native reader/path capabilities remain internal.
+A bounded close failure retains the original cleanup and guard until admitted
+durable work settles. Internal handles are reference-counted and the
+maintenance guard remains shared until the last owner closes. Backend/directory
+changes while a SQLite runtime is owned are rejected.
+
+`closeBackend()` caches the original cleanup and joins admitted requests,
+control/provider operations and their finalizers before releasing its owner.
+`ProxyInstance.close()` bounds the wait after HTTP drain: an unjoined cleanup
+rejects instead of reporting success, while the original cleanup retains SQL
+and ChatGPT ownership until those operations join. Repeated calls return the
+same promise. `session/deletionCleanup.ts` separately owns GC from admission,
+including gaps between transactions and native child creation. Its per-proxy
+async context keeps sibling shutdown independent; its directory ledger retains
+the final SQL owner until original cleanup settles, including after GC returns
+a deferred timeout. `deletionChildClosure.ts` requires the original child's
+exit, close and both captured pipe closures; POSIX also requires an empty
+process group. Timed-out custom deleters retain custody until their original
+promise settles. Logging a deferred GC result cannot discharge those owners.
+Recovery also requires authoritative death of the original claiming proxy,
+then its recorded executor and POSIX group. A live, indeterminate or missing
+owner cannot be replaced merely because the executor exited. A deferred claim
+stays fenced until the owning proxy stops; late cleanup may release storage
+ownership without retroactively completing that claim.
+
+Native handles remain owned through post-open provenance validation. A startup
+failure closes the native handle before releasing its guard; an uncertain close
+retains the guard and requires process restart before maintenance. Offline WAL
+TRUNCATE requires an exclusive maintenance connection and one local handle.
+A sole runtime handle still holds shared ownership and may only use PASSIVE.
+
+Standalone cache/store operations remain synchronous except the owner-approved
+`clearSessionCache(): Promise<void>`. Clear resets both LRUs immediately and
+fences older cache commit hooks. SQL cleanup joins bounded FIFO admission; a
+second reset runs at its durable COMMIT before later publications, rather than
+in an await continuation that could erase them. Internal synchronous scopes
+join the existing transaction. Cleanup keeps its best-effort error policy;
+callers await it before relying on completed durable work. JSON cleanup still
+runs synchronously before returning its completion promise. Server
+mutation roots enter asynchronous admission around the complete operation;
+nested store writes join the same transaction. Lifecycle publication promotes
+the resource and publishes its mapping/pins/priority state in one COMMIT. Its
+callback is synchronous and performs no SDK, filesystem or process probes.
+Cache and priority-memory changes are commit hooks; server publication flags
+are set only after the awaited durable publication returns. Unknown COMMIT
+outcomes retain the turn fence and never authorize abandonment of that fork.
+
+Native SQLite `busy_timeout=0` prevents synchronous lock waits. A bounded local
+FIFO retries BEGIN asynchronously, while SQLite serializes different processes.
+Read scopes use one snapshot and bypass in-memory authority. Maintenance uses
+bounded pages and PASSIVE checkpoints; explicit offline commands own migration,
+export and TRUNCATE. See [configuration](docs/configuration.md#sqlite-session-bookkeeping)
+and the runtime/COMMIT integration tests for the executable contract.
 
 Sessions map an agent's conversation ID to a Claude SDK session ID. Two caches work in tandem:
 
@@ -503,6 +660,13 @@ failing over, and a pool exhausted after headers emits one SSE error frame.
 The relay is bounded: the outer queue holds 64 KiB, and an incomplete prelude
 reaching 64 KiB ends sniffing and relays the attempt unchanged.
 
+Every priority attempt adopts the request's one abort link, which carries the
+client going away, the session-turn watchdog, subtree cancellation and
+shutdown to the SDK child. `handleMessages` detaches only a link it made
+itself; the admission owner detaches the request's link once the request is
+over. The dispatch returns from the handler while its attempts are still
+running, so a detach on return would leave them deaf to all four.
+
 **A `[1m]` bench is scoped to whatever actually failed.** Extra Usage exhaustion
 is an entitlement fact about the account, so it benches the whole profile. A
 plain rate limit benches only the session that hit it (`models.ts`,
@@ -564,8 +728,8 @@ Three tiers, each catching different classes of bugs:
 
 | Tier | Files | SDK | Speed | Runs In |
 |------|-------|-----|-------|---------|
-| **Unit** | `src/__tests__/*-unit.test.ts` | None | Fast | CI (`bun test`) |
-| **Integration** | `src/__tests__/proxy-*.test.ts` | Mocked | Fast | CI (`bun test`) |
+| **Unit** | `src/__tests__/*-unit.test.ts` | None | Fast | CI (`npm test`) |
+| **Integration** | `src/__tests__/proxy-*.test.ts` | Mocked | Fast | CI (`npm test`) |
 | **E2E** | `E2E.md` | Real (Claude Max) | Slow | Manual, pre-release |
 
 - **Unit tests**: Pure functions, no mocks, no I/O.
@@ -580,8 +744,11 @@ Tests that need `clearSessionCache` or `createProxyServer` import from `../proxy
 Every change must pass all existing unit and integration tests:
 
 ```bash
-npm test    # runs: bun test
+npm test    # typechecks (pretest), then the full suite with process-global mocks isolated
 ```
+
+A targeted `bun test <file>` does not typecheck; run `npm run typecheck` (and
+`npm run build` for Node entrypoints) before relying on it.
 
 E2E tests (`E2E.md`) should be run before releases or after major refactors.
 
@@ -630,7 +797,7 @@ remain synchronous; same-context recursive acquisition is rejected explicitly.
 
 `sessionStore.ts` mutations are synchronous and run on the event loop, so their cost is lag for every request. The parsed document is cached by file identity (device, inode, size, mtime, ctime); every writer publishes by rename while holding the store lock, so a locked mutation that finds the cache current builds on it without re-parsing. Mutators receive a copy-on-write draft and replace entries rather than editing them. New entries own a deep copy of caller data before serialization. Cached entries/maps and metadata are frozen; privately parsed nested arrays are frozen before a lookup or snapshot exposes them, avoiding a full nested walk for a single cold lookup. Each entry's serialized UTF-8 bytes are memoized, so a write encodes only the entries it changed. Unchanged entries keep their identity and serialized bytes. The file format, lock, fsync and rename are unchanged.
 
-A conversation that has run under several profiles has one mapping per profile (`<profile>:<session>`), each holding full per-message hashes and pinning its own transcript. With explicit `MERIDIAN_SESSION_PROFILE_COPY_PRUNE=1`, before each GC sweep mappings superseded by a newer copy under another profile and unused for `MERIDIAN_SESSION_PROFILE_COPY_GRACE_MS` (default 24 hours, `DEFAULT_PROFILE_COPY_GRACE_MS`) are removed. Priority route and rollback mappings and conversations with a turn registered in this process are exempt. Removal only unpins transcripts; reconciliation retires them through the normal lifecycle backlog, and `releaseSupersededProfileCopies` limits the transcripts it unpins so that at least half of the pending budget stays free and admission never has to return the prune's retirements to live. A conversation returning to a pruned profile replays instead of resuming. Pruning is off by default to preserve native resume history, including SDK thinking that flattened replay cannot restore. Maintenance acquires nonwaiting conversation leases and reserves retirement capacity while holding the lifecycle lock; held or stale turn locks defer pruning.
+A conversation that has run under several profiles has one mapping per profile (`<profile>:<session>`), each holding full per-message hashes and pinning its own transcript. With explicit `MERIDIAN_SESSION_PROFILE_COPY_PRUNE=1`, before each GC sweep mappings superseded by a newer copy under another profile and unused for `MERIDIAN_SESSION_PROFILE_COPY_GRACE_MS` (default 24 hours, `DEFAULT_PROFILE_COPY_GRACE_MS`) are removed. Priority route and rollback mappings and conversations with a turn registered in this process are exempt. Removal only unpins transcripts; reconciliation retires them through the normal lifecycle backlog, and `releaseSupersededProfileCopies` limits the transcripts it unpins so that at least half of the pending budget stays free and admission never has to return the prune's retirements to live. A conversation returning to a pruned profile replays instead of resuming. A profile's own copy also gives way when another profile's copy, used since, holds more of the raw client history (`copyElsewhereHoldingMore` in `session/cache.ts`): the lineage becomes `diverged` with reason `moved-on-elsewhere` and the turn replays, because a resume delta would drop the replies given elsewhere. Only the copy that would be resumed triggers the lookup, which reads the other profiles' mappings from the shared store. The guard needs the newer mapping present: an explicit eviction still brings the stale resume back. A shared-store read error rejects the request before SDK execution instead of authorizing stale resume. Pruning and expiry remove the older, stale copy first and lead to a replay. Pruning is off by default to preserve native resume history, including SDK thinking that flattened replay cannot restore. Maintenance acquires nonwaiting conversation leases and reserves retirement capacity while holding the lifecycle lock; held or stale turn locks defer pruning. SQLite uses the same pure selection rules over ordered mapping metadata, rechecks exact generations and protected routes, and commits mapping removal plus its retirement reservation atomically. Application activity/pin callbacks and path observations run outside native transactions, including a fresh activity check after FIFO or SQLite busy waits. Additional pins are refreshed by reconciliation before the turn leases release; destructive GC claims independently refresh their pins.
 
 ## Lineage hash encoding
 

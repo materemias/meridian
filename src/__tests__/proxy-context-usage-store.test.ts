@@ -43,15 +43,15 @@ const { setSessionStoreDir, storeSharedSession } = await import("../proxy/sessio
 describe("GET /v1/sessions/:claudeSessionId/context-usage — shared store", () => {
   let tmpSessionDir: string
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tmpSessionDir = mkdtempSync(join(tmpdir(), "context-usage-store-"))
     setSessionStoreDir(tmpSessionDir)
-    clearSessionCache()
+    await clearSessionCache()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     setSessionStoreDir(null)
-    clearSessionCache()
+    await clearSessionCache()
     try { rmSync(tmpSessionDir, { recursive: true, force: true }) } catch {}
   })
 

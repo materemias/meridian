@@ -136,8 +136,8 @@ function continuation() {
 }
 
 describe("Busy-session resume retry (#630)", () => {
-  beforeEach(() => {
-    clearSessionCache()
+  beforeEach(async () => {
+    await clearSessionCache()
     queryCalls = []
     queryCallCount = 0
     busyFailCount = 0

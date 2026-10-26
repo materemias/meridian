@@ -29,7 +29,7 @@ const { lookupSharedSession, storeSharedSession } = await import("../proxy/sessi
 const { storeSession } = await import("../proxy/session/cache")
 const { openCodePrimaryAgentContextHash, requiresOpenCodeAgentReplay } = await import("../proxy/adapters/opencodeAgentContext")
 
-beforeEach(() => { clearSessionCache(); captured.length = 0 })
+beforeEach(async () => { await clearSessionCache(); captured.length = 0 })
 
 it("compares only explicit primary-agent identity when the client prompt is enabled", () => {
   const digest = openCodePrimaryAgentContextHash("primary", "build")

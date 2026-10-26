@@ -85,10 +85,10 @@ const BASE_BODY = {
 }
 
 describe("Claude Code live prompt with trailing system metadata", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     capturedPrompt = undefined
     mockMessages = [assistantMessage([{ type: "text", text: "ok" }])]
-    clearSessionCache()
+    await clearSessionCache()
   })
 
   it("keeps the first real user request outside a history envelope", async () => {
@@ -178,10 +178,10 @@ describe("Claude Code live prompt with trailing system metadata", () => {
 // ─── body field passthrough ───────────────────────────────────────────────────
 
 describe("SDK param passthrough — body fields", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     capturedOptions = {}
     mockMessages = [assistantMessage([{ type: "text", text: "ok" }])]
-    clearSessionCache()
+    await clearSessionCache()
   })
 
   it("forwards effort from body", async () => {
@@ -254,10 +254,10 @@ describe("SDK param passthrough — body fields", () => {
 // ─── header overrides ─────────────────────────────────────────────────────────
 
 describe("SDK param passthrough — header overrides", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     capturedOptions = {}
     mockMessages = [assistantMessage([{ type: "text", text: "ok" }])]
-    clearSessionCache()
+    await clearSessionCache()
   })
 
   it("x-opencode-effort overrides body effort", async () => {
@@ -394,10 +394,10 @@ describe("SDK param passthrough — header overrides", () => {
 describe("strip-all policy disables thinking when thinking beta is stripped", () => {
   let savedPolicy: string | undefined
 
-  beforeEach(() => {
+  beforeEach(async () => {
     capturedOptions = {}
     mockMessages = [assistantMessage([{ type: "text", text: "ok" }])]
-    clearSessionCache()
+    await clearSessionCache()
     savedPolicy = process.env.MERIDIAN_BETA_POLICY
     process.env.MERIDIAN_BETA_POLICY = "strip-all"
   })
@@ -458,9 +458,9 @@ describe("strip-all policy disables thinking when thinking beta is stripped", ()
 // ─── usage logging ────────────────────────────────────────────────────────────
 
 describe("Usage logging", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     capturedOptions = {}
-    clearSessionCache()
+    await clearSessionCache()
   })
 
   it("logs usage line after non-streaming response", async () => {
@@ -542,9 +542,9 @@ describe("Usage logging", () => {
 // ─── GET /v1/sessions/:claudeSessionId/context-usage ─────────────────────────
 
 describe("GET /v1/sessions/:claudeSessionId/context-usage", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     mockMessages = []
-    clearSessionCache()
+    await clearSessionCache()
   })
 
   it("returns 404 for unknown session ID", async () => {

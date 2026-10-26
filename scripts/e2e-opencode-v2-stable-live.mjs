@@ -20,6 +20,15 @@ const project = join(root, 'project')
 const config = join(root, 'opencode')
 const meridianConfig = join(root, 'meridian')
 for (const path of [project, config, meridianConfig]) mkdirSync(path)
+// The server scrub a Claude subscription needs for OpenCode traffic; without
+// it Claude can refuse the client as third-party ("extra usage").
+if (process.env.E2E_PLUGIN_PATH) {
+  writeFileSync(join(meridianConfig, 'plugins.json'),
+    JSON.stringify({ plugins: [{ path: resolve(process.env.E2E_PLUGIN_PATH), enabled: true }] }))
+}
+// The source the installed plugin is expected to send for attached compaction;
+// override only to observe an older plugin build as a control.
+const compactionSource = process.env.E2E_COMPACTION_SOURCE ?? 'fork-compaction'
 const marker = `OC2_STABLE_${randomUUID()}`
 const variantMarker = `VARIANT_${randomUUID()}`
 const fileReceipt = `FILE_RECEIPT_${randomUUID()}`
@@ -40,6 +49,8 @@ Object.assign(proxyEnv, {
   INIT_CWD: project,
 })
 const observed = []
+let summary
+let compactionModels = []
 let proxy
 let proxyOutput
 let relay
@@ -216,8 +227,15 @@ try {
     })
     assert(settled.ok, `Session compaction did not settle: ${settled.status}`)
     assert(observed.slice(beforeCompaction).some(row => row.session === primary.session
-      && row.source === 'subagent-compaction' && row.mode === 'primary' && !row.attested),
-    `Compaction changed the root identity or tier: ${JSON.stringify(observed.slice(beforeCompaction))}`)
+      && row.source === compactionSource && row.mode === 'primary' && !row.attested),
+    `Compaction changed the root identity or source: ${JSON.stringify(observed.slice(beforeCompaction))}`)
+    // The proxy host runs Meridian silently, so its request log lines (which
+    // name the routed model) are read from the diagnostic log while it runs.
+    const logs = await fetch(`${proxyURL}/telemetry/logs?limit=500`).then(r => r.ok ? r.json() : []).catch(() => [])
+    compactionModels = (Array.isArray(logs) ? logs : []).flatMap(entry => {
+      const routed = String(entry?.message ?? '').match(new RegExp(` source=${compactionSource}\\b.*? model=(\\S+)`))
+      return routed ? [routed[1]] : []
+    })
   } finally {
     server.kill()
     await server.exited
@@ -226,9 +244,9 @@ try {
     writeFileSync(join(root, 'server.stderr'), stderr)
   }
   writeFileSync(join(root, 'requests.json'), JSON.stringify(observed, null, 2))
-  console.log(JSON.stringify({ result: 'PASS', root, client: expectedClientVersion, meridian: version, model,
+  summary = { result: 'PASS', root, client: expectedClientVersion, meridian: version, model,
     requests: observed.length, primary: observed.filter(row => row.agent === 'build'),
-    auxiliary: observed.filter(row => row.agent === 'generate' || row.source === 'subagent-compaction') }))
+    auxiliary: observed.filter(row => row.agent === 'generate' || row.source === compactionSource) }
 } finally {
   relay?.stop(true)
   if (proxy) {
@@ -238,6 +256,16 @@ try {
       const [stdout, stderr] = await proxyOutput
       writeFileSync(join(root, 'meridian.stdout'), stdout)
       writeFileSync(join(root, 'meridian.stderr'), stderr)
+      // Fallback for a proxy that is not silent: its request log on stdout/stderr.
+      if (compactionModels.length === 0) {
+        compactionModels = [...`${stdout}\n${stderr}`.matchAll(new RegExp(` source=${compactionSource}\\b[^\\n]*? model=(\\S+)`, 'g'))].map(match => match[1])
+      }
     }
   }
+}
+if (summary) {
+  const expected = process.env.E2E_EXPECT_COMPACTION_MODEL
+  if (expected) assert(compactionModels.length > 0 && compactionModels.every(routed => routed === expected),
+    `Compaction was routed to ${JSON.stringify(compactionModels)}, expected ${expected}`)
+  console.log(JSON.stringify({ ...summary, compactionModels }))
 }

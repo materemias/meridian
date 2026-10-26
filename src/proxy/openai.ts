@@ -14,7 +14,8 @@
  *   3. Each chat completions request gets a fresh SDK session
  * A request that carries a session key the adapter recognizes (Jcode's
  * x-jcode-session, or the OpenCode-family x-opencode-session /
- * x-session-affinity) is exempt: it keeps its real messages and resumes like
+ * x-session-affinity, or the generic x-session-id) is exempt: it keeps its
+ * real messages and resumes like
  * any keyed client. An unkeyed request keeps the packing above.
  */
 

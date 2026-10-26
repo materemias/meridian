@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { setupStoreBackend, teardownStoreBackend } from "./fixtures/bookkeeping-store-backend"
 import { clearSessionCache, evictSession, getSessionByClaudeId, lookupSession, storeSession } from "../proxy/session/cache"
 import { getConversationFingerprint } from "../proxy/session/fingerprint"
 import { evictSharedSession, lookupSharedSession, lookupSharedSessionResult, setSessionStoreDir, storeSharedSession } from "../proxy/sessionStore"
@@ -9,14 +10,16 @@ import { evictSharedSession, lookupSharedSession, lookupSharedSessionResult, set
 describe("cross-process session cache coherence", () => {
   let dir: string
 
-  beforeEach(() => {
+  beforeEach(async () => {
     dir = mkdtempSync(join(tmpdir(), "meridian-cache-coherence-"))
     setSessionStoreDir(dir, { skipLocking: false })
-    clearSessionCache()
+    setupStoreBackend(dir)
+    await clearSessionCache()
   })
 
-  afterEach(() => {
-    clearSessionCache()
+  afterEach(async () => {
+    await clearSessionCache()
+    teardownStoreBackend()
     setSessionStoreDir(null)
     rmSync(dir, { recursive: true, force: true })
   })

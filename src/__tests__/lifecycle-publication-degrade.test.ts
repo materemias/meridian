@@ -140,11 +140,11 @@ function expectFailedPublication(status: number, text: string, stream: boolean):
 describe("terminal publication under a stalled lifecycle lock", () => {
   let sessionDir = ""
 
-  beforeEach(() => {
+  beforeEach(async () => {
     sessionDir = mkdtempSync(join(tmpdir(), "meridian-publication-degrade-"))
     setSessionStoreDir(sessionDir)
     resetActiveProfile()
-    clearSessionCache()
+    await clearSessionCache()
     diagnosticLog.clear()
     queryCalls = 0
     capturedQueries.length = 0

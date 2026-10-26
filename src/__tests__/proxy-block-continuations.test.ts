@@ -29,7 +29,7 @@ const hook = (value: unknown) => text(`<user-prompt-submit-hook>${JSON.stringify
 const result = { type: "tool_result", tool_use_id: "read-1", content: "ALREADY_DELIVERED" }
 
 describe("block continuations through HTTP", () => {
-  beforeEach(() => { captured = []; clearSessionCache() })
+  beforeEach(async () => { captured = []; await clearSessionCache() })
   for (const stream of [false, true]) {
     async function post(app: ReturnType<typeof createProxyServer>["app"], key: string, messages: Message[], agent = "opencode") {
       const response = await app.fetch(new Request("http://localhost/v1/messages", {

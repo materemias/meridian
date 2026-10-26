@@ -91,13 +91,13 @@ function queryStarted(): Promise<void> {
 describe("request cancellation propagation", () => {
   let originalPassthrough: string | undefined
 
-  beforeEach(() => {
+  beforeEach(async () => {
     originalPassthrough = process.env.MERIDIAN_PASSTHROUGH
     process.env.MERIDIAN_PASSTHROUGH = "1"
     mode = "complete"
     capturedController = undefined
     notifyQueryStarted = undefined
-    clearSessionCache()
+    await clearSessionCache()
   })
 
   afterEach(() => {

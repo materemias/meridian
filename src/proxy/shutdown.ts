@@ -13,6 +13,35 @@ export interface ServerConnectionTracker {
   dispose(): void
 }
 
+/** Join the admitted work, including finalizers after HTTP has been closed. */
+export async function waitForShutdownIdle(hasPendingWork: () => boolean): Promise<void> {
+  while (hasPendingWork()) {
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 25)
+      timer.unref?.()
+    })
+  }
+}
+
+/** Bound the caller's wait without abandoning or releasing the original owner. */
+export function withShutdownDeadline(joined: Promise<void>, timeoutMs = 2_000): Promise<void> {
+  let timedOut = false
+  let timer: ReturnType<typeof setTimeout>
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true
+      reject(new Error("Proxy shutdown did not join admitted work before its deadline; ownership retained until cleanup settles"))
+    }, timeoutMs)
+  })
+  void joined.catch(error => {
+    if (timedOut) {
+      try { console.error("[PROXY] Deferred shutdown cleanup failed:", error) }
+      catch { return /* Reporting must not release uncertain ownership. */ }
+    }
+  })
+  return Promise.race([joined, deadline]).finally(() => clearTimeout(timer))
+}
+
 /** Track sockets from server startup so forced shutdown works across runtimes. */
 export function trackServerConnections(server: Server): ServerConnectionTracker {
   const sockets = new Set<Socket>()

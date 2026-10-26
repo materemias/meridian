@@ -166,12 +166,12 @@ describe("onResponseDone", () => {
 describe("GET /inflight", () => {
   let sessionDir = ""
 
-  beforeEach(() => {
+  beforeEach(async () => {
     sessionDir = mkdtempSync(join(tmpdir(), "meridian-inflight-test-"))
     setSessionStoreDir(sessionDir)
     queryCalls = 0
     controls = []
-    clearSessionCache()
+    await clearSessionCache()
   })
 
   afterEach(async () => {
