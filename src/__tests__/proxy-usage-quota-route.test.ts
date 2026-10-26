@@ -355,9 +355,11 @@ describe("GET /v1/usage/quota/all — null attribution", () => {
   it("serves each profile's last good reset inventory with its original freshness", async () => {
     const bankedResets: OAuthBankedResets = {
       eligible: true,
+      ineligibleReason: null,
+      nextGrantId: "remaining",
       grants: [
-        { id: "expired", resetsLeft: 0, expiresAt: Date.UTC(2020, 0, 1) },
-        { id: "remaining", resetsLeft: 2, expiresAt: Date.UTC(2030, 0, 1) },
+        { id: "expired", resetsLeft: 0, expiresAt: Date.UTC(2020, 0, 1), startsAt: null, paused: false, usableNow: false },
+        { id: "remaining", resetsLeft: 2, expiresAt: Date.UTC(2030, 0, 1), startsAt: Date.UTC(2026, 0, 1), paused: false, usableNow: true },
       ],
     }
     const store = {
@@ -370,9 +372,9 @@ describe("GET /v1/usage/quota/all — null attribution", () => {
       force: true, profileId: "work", store,
       fetchImpl: async () => Response.json({
         five_hour: { utilization: 25 },
-        cedar_ember: { eligible: true, grants: [
-          { id: "expired", resets_left: 0, ends_at: "2020-01-01T00:00:00Z" },
-          { id: "remaining", resets_left: 2, ends_at: "2030-01-01T00:00:00Z" },
+        cedar_ember: { eligible: true, next_grant_id: "remaining", grants: [
+          { id: "expired", resets_left: 0, ends_at: "2020-01-01T00:00:00Z", paused: false, usable_now: false },
+          { id: "remaining", resets_left: 2, ends_at: "2030-01-01T00:00:00Z", starts_at: "2026-01-01T00:00:00Z", paused: false, usable_now: true },
         ] },
       }),
     })
@@ -399,7 +401,7 @@ describe("GET /v1/usage/quota/all — null attribution", () => {
     const usage = mock(async () => ({
       windows: [{ type: "five_hour", utilization: 0.5, resetsAt: null }],
       extraUsage: null,
-      bankedResets: { eligible: true, grants: [{ id: "host-grant", resetsLeft: 1, expiresAt: null }] },
+      bankedResets: { eligible: true, ineligibleReason: null, nextGrantId: null, grants: [{ id: "host-grant", resetsLeft: 1, expiresAt: null, startsAt: null, paused: null, usableNow: null }] },
       fetchedAt: 1_730_000_000_000,
     }))
     __setFetchOAuthUsageOverride(usage)

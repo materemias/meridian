@@ -28,10 +28,24 @@ import { claudeLog } from "../logger"
 import { isCredentialsReadOnly } from "./credentialsMode"
 import { parseRetryAfterMs } from "./retryAfter"
 import { createPlatformCredentialStore, refreshOAuthToken, type CredentialStore } from "./tokenRefresh"
+import { bundledClaudeCodeVersion } from "./models"
 
+// Policy for the query flag and User-Agent: profiles-routing.spec.md, "OAuth usage request identity".
 const OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1"
 const OAUTH_BETA_HEADER = "oauth-2025-04-20"
-const OAUTH_USER_AGENT = "claude-cli/2.1.304 (external, cli)"
+const OAUTH_USER_AGENT_FALLBACK_VERSION = "2.1.304"
+const CLAUDE_CODE_VERSION_FORMAT = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/
+let oauthUserAgentValue: string | undefined
+
+/** The Claude Code client identity sent on every OAuth usage, identity and reset request. */
+export function oauthUserAgent(): string {
+  if (oauthUserAgentValue === undefined) {
+    const bundled = bundledClaudeCodeVersion()
+    const version = bundled && CLAUDE_CODE_VERSION_FORMAT.test(bundled) ? bundled : OAUTH_USER_AGENT_FALLBACK_VERSION
+    oauthUserAgentValue = `claude-cli/${version} (external, cli)`
+  }
+  return oauthUserAgentValue
+}
 
 /** Raw shape returned by Anthropic. Most fields are optional/nullable. */
 interface RawOAuthWindow {
@@ -92,10 +106,19 @@ export interface OAuthBankedResetGrant {
   id: string | null
   resetsLeft: number
   expiresAt: number | null
+  /** Epoch ms the grant becomes usable, or null when absent/unreadable. */
+  startsAt: number | null
+  /** Provider's flags; null when absent or not a boolean. */
+  paused: boolean | null
+  usableNow: boolean | null
 }
 
 export interface OAuthBankedResets {
   eligible: boolean
+  /** Provider's reason the account is ineligible, or null when absent/unreadable. */
+  ineligibleReason: string | null
+  /** The grant the provider would redeem next; null unless it names a listed grant. */
+  nextGrantId: string | null
   grants: OAuthBankedResetGrant[]
 }
 
@@ -277,6 +300,14 @@ function parseResetDate(raw: unknown): number | null {
   return parseIsoToMs(RESET_DATE_TIMEZONE.test(raw) ? raw : `${raw}Z`)
 }
 
+const GRANT_ID_FORMAT = /^[a-z0-9_-]{1,40}$/
+const INELIGIBLE_REASON_FORMAT = /^[a-z0-9_]{1,64}$/
+
+function optionalBoolean(raw: object, key: string): boolean | null {
+  const value: unknown = key in raw ? Reflect.get(raw, key) : undefined
+  return typeof value === "boolean" ? value : null
+}
+
 function parseBankedResets(raw: unknown): OAuthBankedResets | null {
   if (typeof raw !== "object" || raw === null || !("eligible" in raw) || typeof raw.eligible !== "boolean"
     || !("grants" in raw) || !Array.isArray(raw.grants)) return null
@@ -291,9 +322,19 @@ function parseBankedResets(raw: unknown): OAuthBankedResets | null {
       id: "id" in grant && typeof grant.id === "string" ? grant.id : null,
       resetsLeft: grant.resets_left,
       expiresAt: parseResetDate("ends_at" in grant ? grant.ends_at : null),
+      startsAt: parseResetDate("starts_at" in grant ? grant.starts_at : null),
+      paused: optionalBoolean(grant, "paused"),
+      usableNow: optionalBoolean(grant, "usable_now"),
     })
   }
-  return { eligible: raw.eligible, grants }
+  const next: unknown = "next_grant_id" in raw ? raw.next_grant_id : null
+  const reason: unknown = "ineligible_reason" in raw ? raw.ineligible_reason : null
+  return {
+    eligible: raw.eligible,
+    ineligibleReason: typeof reason === "string" && INELIGIBLE_REASON_FORMAT.test(reason) ? reason : null,
+    nextGrantId: typeof next === "string" && GRANT_ID_FORMAT.test(next) && grants.some(grant => grant.id === next) ? next : null,
+    grants,
+  }
 }
 
 function normalizeUtilization(raw: number | null | undefined): number | null {
@@ -423,7 +464,7 @@ async function callAnthropic(
       Authorization: `Bearer ${token}`,
       "anthropic-beta": OAUTH_BETA_HEADER,
       Accept: "application/json",
-      "User-Agent": OAUTH_USER_AGENT,
+      "User-Agent": oauthUserAgent(),
     },
     signal: signal ?? AbortSignal.timeout(10_000),
   })
@@ -549,7 +590,7 @@ export async function redeemOAuthQuotaReset(
   const headers = {
     Authorization: `Bearer ${token}`,
     "anthropic-beta": OAUTH_BETA_HEADER,
-    "User-Agent": OAUTH_USER_AGENT,
+    "User-Agent": oauthUserAgent(),
     "Content-Type": "application/json",
   }
   let organization: string

@@ -9,7 +9,8 @@
  */
 
 import { describe, expect, test, beforeEach, afterEach, setSystemTime } from "bun:test"
-import { clearOAuthUsageForProfile, fetchOAuthUsage, fetchOAuthUsageResult, peekOAuthUsage, resetOAuthUsageCache, toUsageEntry } from "../proxy/oauthUsage"
+import { clearOAuthUsageForProfile, fetchOAuthUsage, fetchOAuthUsageResult, oauthUserAgent, peekOAuthUsage, resetOAuthUsageCache, toUsageEntry } from "../proxy/oauthUsage"
+import { bundledClaudeCodeVersion } from "../proxy/models"
 import type { CredentialStore } from "../proxy/tokenRefresh"
 
 const SAMPLE_RESPONSE = {
@@ -112,8 +113,8 @@ describe("oauthUsage", () => {
     expect(sevenDay).toBeDefined()
     expect(sevenDay!.utilization).toBeCloseTo(0.05, 5)
     expect(result?.bankedResets).toEqual({
-      eligible: true,
-      grants: [{ id: "sample-reset", resetsLeft: 1, expiresAt: Date.parse("2026-11-01T00:00:00Z") }],
+      eligible: true, ineligibleReason: null, nextGrantId: null,
+      grants: [{ id: "sample-reset", resetsLeft: 1, expiresAt: Date.parse("2026-11-01T00:00:00Z"), startsAt: null, paused: null, usableNow: null }],
     })
   })
 
@@ -134,13 +135,13 @@ describe("oauthUsage", () => {
     }))
     const result = await fetchOAuthUsage({ force: true, store: makeStore("t"), fetchImpl })
     expect(result?.bankedResets?.grants).toEqual([
-      { id: "expired", resetsLeft: 0, expiresAt: Date.UTC(2020, 0, 1) },
-      { id: "paused", resetsLeft: 2, expiresAt: Date.UTC(2030, 0, 1) },
-      { id: "future", resetsLeft: Number.MAX_SAFE_INTEGER, expiresAt: Date.UTC(2091, 0, 1) },
-      { id: null, resetsLeft: 1, expiresAt: null },
-      { id: null, resetsLeft: 3, expiresAt: null },
-      { id: null, resetsLeft: 4, expiresAt: null },
-      { id: null, resetsLeft: 5, expiresAt: Date.UTC(2030, 0, 1, 5) },
+      { id: "expired", resetsLeft: 0, expiresAt: Date.UTC(2020, 0, 1), startsAt: null, paused: null, usableNow: null },
+      { id: "paused", resetsLeft: 2, expiresAt: Date.UTC(2030, 0, 1), startsAt: null, paused: true, usableNow: null },
+      { id: "future", resetsLeft: Number.MAX_SAFE_INTEGER, expiresAt: Date.UTC(2091, 0, 1), startsAt: Date.UTC(2090, 0, 1), paused: null, usableNow: null },
+      { id: null, resetsLeft: 1, expiresAt: null, startsAt: null, paused: null, usableNow: null },
+      { id: null, resetsLeft: 3, expiresAt: null, startsAt: null, paused: null, usableNow: null },
+      { id: null, resetsLeft: 4, expiresAt: null, startsAt: null, paused: null, usableNow: null },
+      { id: null, resetsLeft: 5, expiresAt: Date.UTC(2030, 0, 1, 5), startsAt: null, paused: null, usableNow: null },
     ])
   })
 
@@ -154,7 +155,8 @@ describe("oauthUsage", () => {
     }))
     const result = await fetchOAuthUsage({ force: true, store: makeStore("t"), fetchImpl })
     expect(result?.bankedResets).toEqual({
-      eligible: true, grants: [{ id: null, resetsLeft: 0, expiresAt: null }],
+      eligible: true, ineligibleReason: null, nextGrantId: null,
+      grants: [{ id: null, resetsLeft: 0, expiresAt: null, startsAt: null, paused: null, usableNow: null }],
     })
   })
 
@@ -171,7 +173,86 @@ describe("oauthUsage", () => {
       force: true, store: makeStore("t"),
       fetchImpl: fixedFetch(() => Response.json({ cedar_ember: { eligible: false, grants: [] } })),
     })
-    expect(result?.bankedResets).toEqual({ eligible: false, grants: [] })
+    expect(result?.bankedResets).toEqual({ eligible: false, ineligibleReason: null, nextGrantId: null, grants: [] })
+  })
+
+  test("exposes the provider's grant-selection fields", async () => {
+    const result = await fetchOAuthUsage({
+      force: true, store: makeStore("t"),
+      fetchImpl: fixedFetch(() => Response.json({ cedar_ember: {
+        eligible: true, next_grant_id: "next-grant",
+        grants: [
+          { id: "next-grant", resets_left: 1, usable_now: true, paused: false, starts_at: "2026-10-01T00:00:00Z" },
+          { id: "later", resets_left: 1, usable_now: false, paused: true, starts_at: "2027-01-01T00:00:00" },
+        ],
+      } })),
+    })
+    expect(result?.bankedResets).toEqual({
+      eligible: true, ineligibleReason: null, nextGrantId: "next-grant",
+      grants: [
+        { id: "next-grant", resetsLeft: 1, expiresAt: null, startsAt: Date.UTC(2026, 9, 1), paused: false, usableNow: true },
+        { id: "later", resetsLeft: 1, expiresAt: null, startsAt: Date.UTC(2027, 0, 1), paused: true, usableNow: false },
+      ],
+    })
+    const ineligible = await fetchOAuthUsage({
+      force: true, store: makeStore("t"),
+      fetchImpl: fixedFetch(() => Response.json({ cedar_ember: { eligible: false, ineligible_reason: "cli_version", next_grant_id: null, grants: [] } })),
+    })
+    expect(ineligible?.bankedResets).toEqual({ eligible: false, ineligibleReason: "cli_version", nextGrantId: null, grants: [] })
+  })
+
+  test("malformed grant-selection fields become null without dropping the grant", async () => {
+    for (const [next_grant_id, ineligible_reason] of [
+      ["missing-grant", "Not A Reason"], ["BAD ID", 42], [7, ""], [null, null], [{}, ["tier"]], ["x".repeat(41), "r".repeat(65)],
+    ] as const) {
+      const result = await fetchOAuthUsage({
+        force: true, store: makeStore("t"),
+        fetchImpl: fixedFetch(() => Response.json({ cedar_ember: {
+          eligible: true, next_grant_id, ineligible_reason,
+          grants: [{ id: "grant", resets_left: 1, usable_now: "yes", paused: 1, starts_at: "soon" }],
+        } })),
+      })
+      expect(result?.bankedResets).toEqual({
+        eligible: true, ineligibleReason: null, nextGrantId: null,
+        grants: [{ id: "grant", resetsLeft: 1, expiresAt: null, startsAt: null, paused: null, usableNow: null }],
+      })
+    }
+  })
+
+  test("usage reads send only the cedar_ember flag and the bundled Claude Code identity", async () => {
+    const version = bundledClaudeCodeVersion()
+    expect(version).toMatch(/^\d+\.\d+\.\d+/)
+    const seen: Array<{ url: string; headers: Headers }> = []
+    await fetchOAuthUsage({ force: true, store: makeStore("t"), fetchImpl: async (url, init) => {
+      seen.push({ url, headers: new Headers(init?.headers) })
+      return Response.json(SAMPLE_RESPONSE)
+    } })
+    expect(seen).toHaveLength(1)
+    const url = new URL(seen[0]!.url)
+    expect(`${url.origin}${url.pathname}`).toBe("https://api.anthropic.com/api/oauth/usage")
+    expect([...url.searchParams]).toEqual([["cedar_ember", "1"]])
+    expect(seen[0]!.headers.get("user-agent")).toBe(`claude-cli/${version} (external, cli)`)
+    expect(oauthUserAgent()).toBe(`claude-cli/${version} (external, cli)`)
+  })
+
+  test("the cedar_ember block leaves existing usage and extra-usage fields unchanged", async () => {
+    const { cedar_ember: _omitted, ...withoutBlock } = SAMPLE_RESPONSE
+    const read = async (body: object) => {
+      resetOAuthUsageCache()
+      const snapshot = await fetchOAuthUsage({ force: true, store: makeStore("t"), fetchImpl: fixedFetch(() => Response.json(body)) })
+      return { windows: snapshot?.windows, extraUsage: snapshot?.extraUsage, bankedResets: snapshot?.bankedResets }
+    }
+    const without = await read(withoutBlock)
+    const withBlock = await read(SAMPLE_RESPONSE)
+    const malformed = await read({ ...withoutBlock, cedar_ember: "garbage" })
+    expect(without.bankedResets).toBeNull()
+    expect(malformed.bankedResets).toBeNull()
+    expect(withBlock.bankedResets).not.toBeNull()
+    expect(withBlock.windows).toEqual(without.windows)
+    expect(withBlock.extraUsage).toEqual(without.extraUsage)
+    expect(malformed.windows).toEqual(without.windows)
+    expect(malformed.extraUsage).toEqual(without.extraUsage)
+    expect(without.extraUsage).toEqual({ isEnabled: true, monthlyLimit: 0, usedCredits: 23630, utilization: null, currency: "USD" })
   })
 
   test("retains cached and stale reset inventory without leaking it across profiles", async () => {
